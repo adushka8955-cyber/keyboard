@@ -32,6 +32,7 @@ import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
 import java.io.File
+import kotlin.math.abs
 
 /**
  * Клавиатура: буквы RU/EN, цифры и символы, строка подсказок (T9-стиль), автоисправление,
@@ -55,6 +56,7 @@ class PhraseKeyboardService : InputMethodService() {
     private var categoryIndex = 0
     private var lastCorrection: Correction? = null
     private var builtVersion = -1
+    private var toolbarOpen = false
 
     // снимок настроек
     private var theme: KeyboardTheme = Themes.all[0]
@@ -78,6 +80,7 @@ class PhraseKeyboardService : InputMethodService() {
     private lateinit var phrasesView: LinearLayout
     private lateinit var tabsRow: LinearLayout
     private lateinit var chipsFlow: FlowLayout
+    private lateinit var arrow: TextView
     private lateinit var toolbar: LinearLayout
     private lateinit var suggestRow: LinearLayout
     private lateinit var preview: TextView
@@ -267,16 +270,33 @@ class PhraseKeyboardService : InputMethodService() {
 
     // ------------------------------------------------------------------ строка подсказок
 
-    private fun buildStrip(): FrameLayout {
-        val strip = FrameLayout(this)
+    private fun buildStrip(): LinearLayout {
+        val strip = LinearLayout(this)
+        strip.orientation = LinearLayout.HORIZONTAL
+        strip.gravity = Gravity.CENTER_VERTICAL
+
+        // Маленькая стрелка слева: открывает/скрывает меню (Фразы, Тема, Настройки).
+        arrow = TextView(this)
+        arrow.gravity = Gravity.CENTER
+        arrow.setTextSize(TypedValue.COMPLEX_UNIT_SP, 26f)
+        arrow.setTextColor(theme.hint)
+        arrow.isClickable = true
+        arrow.setOnClickListener {
+            haptic(it)
+            toolbarOpen = !toolbarOpen
+            refreshSuggestions()
+        }
+        strip.addView(arrow, LinearLayout.LayoutParams(dp(40), MATCH))
+
+        val content = FrameLayout(this)
 
         toolbar = LinearLayout(this)
         toolbar.orientation = LinearLayout.HORIZONTAL
         toolbar.gravity = Gravity.CENTER_VERTICAL
-        toolbar.addView(chip("Фразы", accent = true) { togglePhrases() }, chipLp())
-        toolbar.addView(chip("Тема") { cycleTheme() }, chipLp())
-        toolbar.addView(chip("Настройки") { openSettings() }, chipLp())
-        strip.addView(toolbar, FrameLayout.LayoutParams(MATCH, MATCH))
+        toolbar.addView(chip("Фразы", accent = true) { closeToolbar(); togglePhrases() }, chipLp())
+        toolbar.addView(chip("Тема") { closeToolbar(); cycleTheme() }, chipLp())
+        toolbar.addView(chip("Настройки") { closeToolbar(); openSettings() }, chipLp())
+        content.addView(toolbar, FrameLayout.LayoutParams(MATCH, MATCH))
 
         suggestRow = LinearLayout(this)
         suggestRow.orientation = LinearLayout.HORIZONTAL
@@ -303,12 +323,26 @@ class PhraseKeyboardService : InputMethodService() {
             if (i < 2) {
                 val divider = View(this)
                 divider.setBackgroundColor(withAlpha(theme.hint, 110))
-                val lp = LinearLayout.LayoutParams(dp(1), dp(20))
-                suggestRow.addView(divider, lp)
+                suggestRow.addView(divider, LinearLayout.LayoutParams(dp(1), dp(20)))
             }
         }
-        strip.addView(suggestRow, FrameLayout.LayoutParams(MATCH, MATCH))
+        content.addView(suggestRow, FrameLayout.LayoutParams(MATCH, MATCH))
+
+        strip.addView(content, LinearLayout.LayoutParams(0, MATCH, 1f))
         return strip
+    }
+
+    private fun closeToolbar() {
+        toolbarOpen = false
+        refreshSuggestions()
+    }
+
+    /** Меню открыто — показываем его; иначе — подсказки (если есть). */
+    private fun updateStrip(showSuggestions: Boolean) {
+        arrow.text = if (toolbarOpen) "\u2039" else "\u203A"
+        toolbar.visibility = if (toolbarOpen) View.VISIBLE else View.GONE
+        suggestRow.visibility =
+            if (!toolbarOpen && showSuggestions) View.VISIBLE else View.GONE
     }
 
     private fun chip(label: String, accent: Boolean = false, onClick: () -> Unit): TextView {
@@ -334,27 +368,22 @@ class PhraseKeyboardService : InputMethodService() {
         return lp
     }
 
-    private fun showToolbar() {
-        suggestRow.visibility = View.GONE
-        toolbar.visibility = View.VISIBLE
-    }
-
     private fun refreshSuggestions() {
-        if (!::suggestRow.isInitialized || !::phrasesView.isInitialized) return
+        if (!::suggestRow.isInitialized || !::phrasesView.isInitialized || !::arrow.isInitialized) return
         if (!suggestionsOn || plainField || noSuggestFlag ||
             phrasesView.visibility == View.VISIBLE
         ) {
-            showToolbar()
+            updateStrip(false)
             return
         }
         val info = currentWordInfo()
         if (info == null || info.skip) {
-            showToolbar()
+            updateStrip(false)
             return
         }
         val list = SpellEngine.suggest(info.raw)
         if (list.isEmpty()) {
-            showToolbar()
+            updateStrip(false)
             return
         }
         currentSuggestions = list
@@ -372,8 +401,7 @@ class PhraseKeyboardService : InputMethodService() {
             val bold = s != null && !s.literal && target != null && s.text == target
             tv.setTypeface(null, if (bold) Typeface.BOLD else Typeface.NORMAL)
         }
-        toolbar.visibility = View.GONE
-        suggestRow.visibility = View.VISIBLE
+        updateStrip(true)
     }
 
     private fun applySuggestion(s: Suggestion) {
@@ -543,6 +571,7 @@ class PhraseKeyboardService : InputMethodService() {
     private fun typeLetter(ch: Char) {
         val ic = currentInputConnection ?: return
         lastCorrection = null
+        toolbarOpen = false
         var out = if (shift != Shift.OFF) ch.uppercaseChar() else ch
         if (smart) {
             // «привет,как» -> «привет, как»
@@ -683,13 +712,6 @@ class PhraseKeyboardService : InputMethodService() {
         val row = newRow()
         val small = 14f
 
-        val phrases = makeKey("Фразы", accent = true, textSp = small)
-        phrases.setTypeface(null, Typeface.BOLD)
-        phrases.setOnClickListener {
-            haptic(it)
-            togglePhrases()
-        }
-
         val symbolsLabel = when {
             layer != Layer.SYMBOLS -> "?123"
             lastLetterLayer == Layer.RU -> "АБВ"
@@ -702,36 +724,17 @@ class PhraseKeyboardService : InputMethodService() {
             renderKeys()
         }
 
-        val lang = makeKey(
-            if (lastLetterLayer == Layer.RU) "RU" else "EN",
-            special = true,
-            textSp = small
-        )
-        lang.setOnClickListener {
+        // Маленькая кнопка с мечетью открывает панель фраз и смайлов.
+        val mosque = makeKey("\uD83D\uDD4C", special = true, textSp = 18f)
+        mosque.setOnClickListener {
             haptic(it)
-            lastLetterLayer = if (lastLetterLayer == Layer.RU) Layer.EN else Layer.RU
-            layer = lastLetterLayer
-            renderKeys()
-        }
-        lang.setOnLongClickListener {
-            haptic(it)
-            (getSystemService(INPUT_METHOD_SERVICE) as InputMethodManager).showInputMethodPicker()
-            true
+            togglePhrases()
         }
 
         val ru = lastLetterLayer == Layer.RU
-        val spaceLabel = when {
-            iosLayout -> if (ru) "пробел" else "space"
-            layer == Layer.SYMBOLS -> ""
-            ru -> "Русский"
-            else -> "English"
-        }
-        val space = makeKey(spaceLabel, textSp = small)
+        val space = makeKey(if (ru) "\u2039   Русский   \u203A" else "\u2039   English   \u203A", textSp = 13f)
         space.setTextColor(theme.hint)
-        space.setOnClickListener {
-            haptic(it)
-            pressSpace()
-        }
+        attachSpaceGestures(space)
 
         val enterText = enterLabel()
         val enterAccent = enterIsAccent()
@@ -746,22 +749,63 @@ class PhraseKeyboardService : InputMethodService() {
             pressEnter()
         }
 
-        if (iosLayout) {
-            row.addView(symbols, keyLp(1.4f))
-            row.addView(lang, keyLp(1f))
-            row.addView(phrases, keyLp(1.5f))
-            row.addView(space, keyLp(3.8f))
-            row.addView(enter, keyLp(1.9f))
-        } else {
-            row.addView(phrases, keyLp(1.7f))
-            row.addView(symbols, keyLp(1.3f))
-            row.addView(lang, keyLp(1f))
-            row.addView(simpleKey(','), keyLp(1f))
-            row.addView(space, keyLp(3.5f))
-            row.addView(simpleKey('.'), keyLp(1f))
-            row.addView(enter, keyLp(1.5f))
-        }
+        row.addView(symbols, keyLp(1.4f))
+        row.addView(mosque, keyLp(1f))
+        row.addView(simpleKey(','), keyLp(1f))
+        row.addView(space, keyLp(3.6f))
+        row.addView(simpleKey('.'), keyLp(1f))
+        row.addView(enter, keyLp(1.9f))
         return row
+    }
+
+    /** Пробел: касание — пробел, свайп влево/вправо — смена языка, долгое нажатие — выбор клавиатуры. */
+    private fun attachSpaceGestures(key: TextView) {
+        var downX = 0f
+        var swiped = false
+        var longPressed = false
+        val longPress = Runnable {
+            longPressed = true
+            (getSystemService(INPUT_METHOD_SERVICE) as InputMethodManager).showInputMethodPicker()
+        }
+        key.setOnTouchListener { v, event ->
+            when (event.actionMasked) {
+                MotionEvent.ACTION_DOWN -> {
+                    downX = event.x
+                    swiped = false
+                    longPressed = false
+                    v.isPressed = true
+                    handler.postDelayed(longPress, 600)
+                }
+                MotionEvent.ACTION_MOVE -> {
+                    if (!swiped && abs(event.x - downX) > dp(40)) {
+                        swiped = true
+                        handler.removeCallbacks(longPress)
+                        v.isPressed = false
+                        haptic(v)
+                        toggleLanguage()
+                    }
+                }
+                MotionEvent.ACTION_UP -> {
+                    v.isPressed = false
+                    handler.removeCallbacks(longPress)
+                    if (!swiped && !longPressed) {
+                        haptic(v)
+                        pressSpace()
+                    }
+                }
+                MotionEvent.ACTION_CANCEL -> {
+                    v.isPressed = false
+                    handler.removeCallbacks(longPress)
+                }
+            }
+            true
+        }
+    }
+
+    private fun toggleLanguage() {
+        lastLetterLayer = if (lastLetterLayer == Layer.RU) Layer.EN else Layer.RU
+        if (layer != Layer.SYMBOLS) layer = lastLetterLayer
+        renderKeys()
     }
 
     private fun simpleKey(ch: Char): TextView {
