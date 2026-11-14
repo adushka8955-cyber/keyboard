@@ -2,7 +2,7 @@ package app.phrasekeys
 
 import android.content.Context
 
-data class PhraseCategory(val title: String, val phrases: List<String>)
+data class PhraseCategory(val title: String, val phrases: List<String>, val emoji: Boolean = false)
 
 /**
  * Встроенные фразы + «Мои фразы» пользователя.
@@ -102,6 +102,43 @@ object PhraseLibrary {
         ),
     )
 
+    /** Смайлы: вставляются без пробела после. */
+    val emojiCategories: List<PhraseCategory> = listOf(
+        PhraseCategory(
+            "😊",
+            listOf(
+                "😀", "😃", "😄", "😁", "😆", "😅", "😂", "🤣", "😊", "😇",
+                "🙂", "😉", "😍", "🥰", "😘", "😋", "😎", "🤗", "🤔", "😐",
+                "😏", "😴", "😢", "😭", "😡", "😱", "🙄", "😬", "🥺", "😌",
+            ),
+            emoji = true
+        ),
+        PhraseCategory(
+            "👍",
+            listOf(
+                "👍", "👎", "👌", "✌", "🤝", "🙏", "👏", "🙌", "💪", "👋",
+                "🤲", "☝", "👆", "👇", "👉", "👈", "✋", "🤞",
+            ),
+            emoji = true
+        ),
+        PhraseCategory(
+            "❤",
+            listOf(
+                "❤", "💙", "💚", "💛", "🧡", "💜", "🖤", "🤍", "💔", "💕",
+                "💖", "✨", "🔥", "⭐", "🌟", "💯", "✅", "❌", "⚡", "🎉", "🎁",
+            ),
+            emoji = true
+        ),
+        PhraseCategory(
+            "🕌",
+            listOf(
+                "🕌", "🕋", "🤲", "📿", "🌙", "☪", "🌹", "🌿", "🕊", "📖",
+                "🤍", "💚", "🙏", "✨", "🌴", "⭐",
+            ),
+            emoji = true
+        ),
+    )
+
     fun loadCustomText(context: Context): String =
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString(KEY_CUSTOM, "") ?: ""
 
@@ -115,9 +152,10 @@ object PhraseLibrary {
     private fun loadCustom(context: Context): List<String> =
         loadCustomText(context).lines().map { it.trim() }.filter { it.isNotEmpty() }
 
-    /** Список категорий для панели: «Мои» (если есть) + встроенные. */
+    /** Список категорий для панели: «Мои» (если есть) + встроенные + смайлы. */
     fun categories(context: Context): List<PhraseCategory> {
         val custom = loadCustom(context)
-        return if (custom.isEmpty()) builtIn else listOf(PhraseCategory("Мои", custom)) + builtIn
+        val base = if (custom.isEmpty()) builtIn else listOf(PhraseCategory("Мои", custom)) + builtIn
+        return base + emojiCategories
     }
 }
