@@ -76,6 +76,11 @@ class PhraseKeyboardService : InputMethodService() {
     // свойства текущего поля ввода
     private var plainField = false
     private var noSuggestFlag = false
+    private var secretField = false
+    private var emailField = false
+    private var phoneField = false
+    private var memoryOn = true
+    private var snapshot: String? = null
 
     private lateinit var root: FrameLayout
     private lateinit var keysView: LinearLayout
@@ -130,6 +135,7 @@ class PhraseKeyboardService : InputMethodService() {
         autocapOn = Prefs.bool(this, Prefs.AUTOCAP, true)
         hapticsOn = Prefs.bool(this, Prefs.HAPTICS, true)
         previewOn = Prefs.bool(this, Prefs.PREVIEW, true)
+        memoryOn = Prefs.bool(this, Prefs.LEARN, true)
         numberRow = Prefs.bool(this, Prefs.NUMBER_ROW, true)
         heightMode = Prefs.str(this, Prefs.HEIGHT, "mid")
         letterSize = Prefs.str(this, Prefs.LETTER_SIZE, "m")
@@ -198,6 +204,14 @@ class PhraseKeyboardService : InputMethodService() {
         val variation = inputType and InputType.TYPE_MASK_VARIATION
         plainField = inputClass != InputType.TYPE_CLASS_TEXT || variation in PLAIN_VARIATIONS
         noSuggestFlag = (inputType and InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS) != 0
+        val isText = inputClass == InputType.TYPE_CLASS_TEXT
+        secretField = (isText && variation in SECRET_VARIATIONS) ||
+            (inputClass == InputType.TYPE_CLASS_NUMBER &&
+                variation == InputType.TYPE_NUMBER_VARIATION_PASSWORD)
+        emailField = isText && (variation == InputType.TYPE_TEXT_VARIATION_EMAIL_ADDRESS ||
+            variation == InputType.TYPE_TEXT_VARIATION_WEB_EMAIL_ADDRESS)
+        phoneField = inputClass == InputType.TYPE_CLASS_PHONE
+        if (!restarting) snapshot = null
 
         layer = when (inputClass) {
             InputType.TYPE_CLASS_NUMBER,
@@ -220,6 +234,11 @@ class PhraseKeyboardService : InputMethodService() {
         super.onFinishInputView(finishingInput)
         handler.removeCallbacks(deleteRunnable)
         lastCorrection = null
+        val last = snapshot
+        if (last != null && learnAllowed && (emailField || phoneField)) {
+            Memory.learnMessage(this, last, false)
+        }
+        snapshot = null
     }
 
     override fun onUpdateSelection(
@@ -234,9 +253,36 @@ class PhraseKeyboardService : InputMethodService() {
             oldSelStart, oldSelEnd, newSelStart, newSelEnd, candidatesStart, candidatesEnd
         )
         if (!::keysView.isInitialized) return
+        trackMemory(oldSelStart, newSelStart, newSelEnd)
         updateAutoShift()
         refreshLetterCase()
         refreshSuggestions()
+    }
+
+    private val learnAllowed: Boolean
+        get() = memoryOn && !secretField && !noSuggestFlag &&
+            (!plainField || emailField || phoneField)
+
+    /**
+     * Следим за текстом поля. Когда поле разом опустело (сообщение отправили) —
+     * запоминаем, что было набрано: фразу, почты, телефоны, даты.
+     */
+    private fun trackMemory(oldStart: Int, newStart: Int, newEnd: Int) {
+        if (!learnAllowed) {
+            snapshot = null
+            return
+        }
+        val ic = currentInputConnection ?: return
+        val prev = snapshot
+        if (newStart == 0 && newEnd == 0 && oldStart >= 4 && prev != null &&
+            ic.getTextAfterCursor(1, 0).isNullOrEmpty()
+        ) {
+            Memory.learnMessage(this, prev, true)
+            snapshot = null
+            return
+        }
+        val before = ic.getTextBeforeCursor(200, 0)?.toString()
+        snapshot = if (before != null && before.length < 200) before else null
     }
 
     // ------------------------------------------------------------------ фон и размеры
@@ -384,8 +430,8 @@ class PhraseKeyboardService : InputMethodService() {
             MenuItem("\uD83C\uDFA8", "Тема") { cycleTheme() },
             MenuItem("\u2699", "Настройки") { openSettings() },
             MenuItem("\uD83D\uDD22", "Ряд цифр") { toggleNumberRow() },
-            MenuItem("\uD83D\uDD20", "Размер букв") { cycleLetterSize() },
-            MenuItem("\u2195", "Высота") { cycleHeight() },
+            MenuItem("\uD83D\uDCC7", "Данные") { showCategoryKind(KIND_DATA) },
+            MenuItem("\u2B50", "Частые") { showCategoryKind(KIND_FREQUENT) },
             MenuItem("\uD83C\uDF10", "Клавиатура") { showImePicker() }
         )
         for (r in 0 until 2) {
@@ -473,6 +519,12 @@ class PhraseKeyboardService : InputMethodService() {
         showPhrases()
     }
 
+    private fun showCategoryKind(kind: Int) {
+        val index = PhraseLibrary.categories(this).indexOfFirst { it.kind == kind }
+        if (index >= 0) categoryIndex = index
+        showPhrases()
+    }
+
     private fun toggleNumberRow() {
         Prefs.putBool(this, Prefs.NUMBER_ROW, !numberRow)
         rebuildView()
@@ -508,24 +560,29 @@ class PhraseKeyboardService : InputMethodService() {
 
     private fun refreshSuggestions() {
         if (!::suggestRow.isInitialized || !::phrasesView.isInitialized || !::arrow.isInitialized) return
-        if (!suggestionsOn || plainField || noSuggestFlag ||
+        if (!suggestionsOn || secretField || noSuggestFlag ||
             phrasesView.visibility == View.VISIBLE
         ) {
             updateStrip(false)
             return
         }
-        val info = currentWordInfo()
-        if (info == null || info.skip) {
-            updateStrip(false)
-            return
+        var mem: List<Suggestion> = if (memoryOn) memorySuggestions() else emptyList()
+        var spell: List<Suggestion> = emptyList()
+        var target: String? = null
+        if (!plainField) {
+            val info = currentWordInfo()
+            if (info != null && !info.skip) {
+                spell = SpellEngine.suggest(info.raw)
+                if (auto) target = SpellEngine.autoCorrection(info.raw, info.sentenceStart)
+            }
         }
-        val list = SpellEngine.suggest(info.raw)
+        mem = mem.take(if (spell.isEmpty()) 3 else 1)
+        val list = (mem + spell).distinctBy { it.text.lowercase() }.take(3)
         if (list.isEmpty()) {
             updateStrip(false)
             return
         }
         currentSuggestions = list
-        val target = if (auto) SpellEngine.autoCorrection(info.raw, info.sentenceStart) else null
         for (i in 0 until suggestViews.size) {
             val tv = suggestViews[i]
             val s = list.getOrNull(i)
@@ -542,14 +599,51 @@ class PhraseKeyboardService : InputMethodService() {
         updateStrip(true)
     }
 
+    /** Подсказки из памяти: данные пользователя, частые фразы, почты и числа. */
+    private fun memorySuggestions(): List<Suggestion> {
+        val ic = currentInputConnection ?: return emptyList()
+        val before = ic.getTextBeforeCursor(120, 0)?.toString() ?: return emptyList()
+        val line = before.substringAfterLast('\n')
+        val token = line.substringAfterLast(' ')
+        val out = ArrayList<Suggestion>()
+
+        if (emailField || phoneField) {
+            for (v in Memory.fieldValues(this, phoneField, token)) {
+                out.add(Suggestion(v, false, token.length, false))
+            }
+            return out
+        }
+        if (plainField) return out
+
+        val complete = before.length < 120 || before.contains('\n')
+        val head = line.trimStart()
+        if (complete && head.length >= 3) {
+            for (p in Memory.phraseMatches(this, head)) {
+                out.add(Suggestion(p, false, line.length, true))
+            }
+        }
+        for (v in Memory.tokenMatches(this, token)) {
+            out.add(Suggestion(v, false, token.length, !Memory.isTokenLike(v)))
+        }
+        return out
+    }
+
     private fun applySuggestion(s: Suggestion) {
         val ic = currentInputConnection ?: return
-        val info = currentWordInfo() ?: return
-        ic.beginBatchEdit()
-        ic.deleteSurroundingText(info.raw.length, 0)
-        ic.commitText(s.text + " ", 1)
-        ic.endBatchEdit()
-        if (s.literal) SpellEngine.learn(this, s.text)
+        val tail = if (s.space) " " else ""
+        if (s.replace >= 0) {
+            ic.beginBatchEdit()
+            ic.deleteSurroundingText(s.replace, 0)
+            ic.commitText(s.text + tail, 1)
+            ic.endBatchEdit()
+        } else {
+            val info = currentWordInfo() ?: return
+            ic.beginBatchEdit()
+            ic.deleteSurroundingText(info.raw.length, 0)
+            ic.commitText(s.text + tail, 1)
+            ic.endBatchEdit()
+            if (s.literal) SpellEngine.learn(this, s.text)
+        }
         lastCorrection = null
         lastSpaceTime = 0L
     }
@@ -1131,7 +1225,11 @@ class PhraseKeyboardService : InputMethodService() {
 
         val category = categories[categoryIndex]
         chipsFlow.removeAllViews()
-        for (phrase in category.phrases) {
+        if (category.phrases.isEmpty() && !category.emoji) {
+            addEmptyHint(category)
+        }
+        category.phrases.forEachIndexed { index, phrase ->
+            val value = category.values?.getOrNull(index) ?: phrase
             val chip = TextView(this)
             chip.text = phrase
             chip.isClickable = true
@@ -1153,12 +1251,46 @@ class PhraseKeyboardService : InputMethodService() {
                     haptic(it)
                     lastCorrection = null
                     lastSpaceTime = 0L
-                    commit("$phrase ")
+                    val tail = when {
+                        category.kind == KIND_DATA -> ""
+                        Memory.isTokenLike(value) -> ""
+                        else -> " "
+                    }
+                    commit(value + tail)
+                }
+                if (category.kind == KIND_FREQUENT) {
+                    chip.setOnLongClickListener {
+                        haptic(it)
+                        Memory.forget(this, value)
+                        renderPhrases()
+                        true
+                    }
                 }
             }
             chipsFlow.addView(chip)
         }
         (chipsFlow.parent as? ScrollView)?.scrollTo(0, 0)
+    }
+
+    private fun addEmptyHint(category: PhraseCategory) {
+        val tv = TextView(this)
+        tv.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+        tv.setTextColor(theme.hint)
+        tv.setPadding(dp(10), dp(8), dp(10), dp(8))
+        if (category.kind == KIND_DATA) {
+            tv.text = "＋ Добавить свои данные (почта, ФИО, телефон…)"
+            tv.setTextColor(theme.text)
+            tv.background = keyBackground(withAlpha(theme.key, theme.keyAlpha), 18)
+            tv.isClickable = true
+            tv.setOnClickListener {
+                haptic(it)
+                openSettings()
+            }
+        } else {
+            tv.text = "Здесь появятся фразы, почты и числа, которые вы часто отправляете. " +
+                "Нажмите и держите, чтобы убрать."
+        }
+        chipsFlow.addView(tv)
     }
 
     private fun emojiBackground(): Drawable {
@@ -1283,6 +1415,12 @@ class PhraseKeyboardService : InputMethodService() {
         private val SENTENCE_END = Regex("[.!?…][\"»”)]*\\s+\$")
 
         /** Поля, где подсказки, автоисправление и автопунктуация выключены. */
+        private val SECRET_VARIATIONS = setOf(
+            InputType.TYPE_TEXT_VARIATION_PASSWORD,
+            InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD,
+            InputType.TYPE_TEXT_VARIATION_WEB_PASSWORD
+        )
+
         private val PLAIN_VARIATIONS = setOf(
             InputType.TYPE_TEXT_VARIATION_PASSWORD,
             InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD,

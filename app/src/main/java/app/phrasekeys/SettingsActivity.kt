@@ -34,6 +34,7 @@ class SettingsActivity : Activity() {
 
     private lateinit var column: LinearLayout
     private lateinit var customEdit: EditText
+    private lateinit var personalEdit: EditText
     private lateinit var themeGrid: FlowLayout
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -48,6 +49,7 @@ class SettingsActivity : Activity() {
         buildThemeSection()
         buildLayoutSection()
         buildSmartSection()
+        buildMemorySection()
         buildPhrasesSection()
 
         val scroll = ScrollView(this)
@@ -59,6 +61,9 @@ class SettingsActivity : Activity() {
         super.onPause()
         if (::customEdit.isInitialized) {
             PhraseLibrary.saveCustomText(this, customEdit.text.toString())
+        }
+        if (::personalEdit.isInitialized) {
+            Memory.savePersonalText(this, personalEdit.text.toString())
         }
     }
 
@@ -152,6 +157,41 @@ class SettingsActivity : Activity() {
         column.addView(button("Забыть выученные слова") {
             SpellEngine.resetUserWords(this)
             Toast.makeText(this, "Готово", Toast.LENGTH_SHORT).show()
+        })
+    }
+
+    private fun buildMemorySection() {
+        column.addView(heading("Мои данные и частые фразы"))
+        column.addView(switchRow("Запоминать частые фразы, почты и числа", Prefs.LEARN, true))
+        column.addView(
+            hint(
+                "Когда вы отправляете сообщение, клавиатура запоминает фразу, почты, телефоны и даты. " +
+                    "После второго раза они появляются в подсказках и во вкладке «Частые». " +
+                    "Пароли, коды и номера карт не запоминаются. Всё хранится только на телефоне."
+            )
+        )
+        column.addView(button("Забыть частые фразы") {
+            Memory.clearLearned(this)
+            Toast.makeText(this, "Готово", Toast.LENGTH_SHORT).show()
+        })
+
+        column.addView(body("Мои данные: по одной строке «Название: значение». Они в панели во вкладке «Данные», а почта и телефон сами предлагаются в нужных полях."))
+        personalEdit = EditText(this)
+        personalEdit.inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE
+        personalEdit.minLines = 6
+        personalEdit.gravity = Gravity.TOP or Gravity.START
+        personalEdit.hint = PERSONAL_TEMPLATE
+        personalEdit.setText(Memory.personalText(this))
+        column.addView(
+            personalEdit,
+            LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+        )
+        column.addView(button("Вставить пример") {
+            if (personalEdit.text.isBlank()) personalEdit.setText(PERSONAL_TEMPLATE)
+        })
+        column.addView(button("Сохранить данные") {
+            Memory.savePersonalText(this, personalEdit.text.toString())
+            Toast.makeText(this, "Сохранено", Toast.LENGTH_SHORT).show()
         })
     }
 
@@ -374,6 +414,10 @@ class SettingsActivity : Activity() {
         (value * resources.displayMetrics.density + 0.5f).toInt()
 
     companion object {
+        private const val PERSONAL_TEMPLATE =
+            "Почта: name@mail.ru\nИмя: Иван\nФамилия: Иванов\nОтчество: Иванович\n" +
+                "ФИО: Иванов Иван Иванович\nТелефон: +7 900 000-00-00\nДата рождения: 01.01.1990"
+
         private const val REQ_PHOTO = 101
     }
 }

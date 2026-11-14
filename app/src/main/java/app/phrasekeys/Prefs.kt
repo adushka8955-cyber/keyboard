@@ -18,6 +18,7 @@ object Prefs {
     const val HEIGHT = "height" // low | mid | high
     const val SHAPE = "shape" // theme | round | square
     const val LETTER_SIZE = "letter_size" // s | m | l
+    const val LEARN = "learn_frequent"
 
     const val PHOTO_FILE = "keyboard_bg.jpg"
 

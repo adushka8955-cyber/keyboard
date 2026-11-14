@@ -2,7 +2,19 @@ package app.phrasekeys
 
 import android.content.Context
 
-data class PhraseCategory(val title: String, val phrases: List<String>, val emoji: Boolean = false)
+data class PhraseCategory(
+    val title: String,
+    val phrases: List<String>,
+    val emoji: Boolean = false,
+    /** KIND_PHRASES — обычные; KIND_DATA — «Мои данные»; KIND_FREQUENT — выученное. */
+    val kind: Int = 0,
+    /** Что вставлять по нажатию (если отличается от подписи на кнопке). */
+    val values: List<String>? = null
+)
+
+const val KIND_PHRASES = 0
+const val KIND_DATA = 1
+const val KIND_FREQUENT = 2
 
 /**
  * Встроенные фразы + «Мои фразы» пользователя.
@@ -156,6 +168,15 @@ object PhraseLibrary {
     fun categories(context: Context): List<PhraseCategory> {
         val custom = loadCustom(context)
         val base = if (custom.isEmpty()) builtIn else listOf(PhraseCategory("Мои", custom)) + builtIn
-        return base + emojiCategories
+        val personal = Memory.personal(context)
+        val data = PhraseCategory(
+            "Данные",
+            personal.map { if (it.label.isEmpty()) it.value else "${it.label}: ${it.value}" },
+            kind = KIND_DATA,
+            values = personal.map { it.value }
+        )
+        val frequent = Memory.frequent(context)
+        val freq = PhraseCategory("Частые", frequent, kind = KIND_FREQUENT, values = frequent)
+        return base + data + freq + emojiCategories
     }
 }

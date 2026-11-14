@@ -4,7 +4,13 @@ import android.content.Context
 import java.util.concurrent.ConcurrentHashMap
 
 /** Вариант в строке подсказок. [literal] = слово «как набрано», его выбор запоминает слово. */
-class Suggestion(val text: String, val literal: Boolean)
+class Suggestion(
+    val text: String,
+    val literal: Boolean,
+    /** >= 0: сколько символов перед курсором заменить (для фраз и данных из памяти). */
+    val replace: Int = -1,
+    val space: Boolean = true
+)
 
 /**
  * Подсказки слов, автоисправление опечаток (русский и английский).
