@@ -111,6 +111,13 @@ class SettingsActivity : Activity() {
                 listOf("low" to "Низкая", "mid" to "Средняя", "high" to "Высокая")
             )
         )
+        column.addView(body("Размер букв и цифр"))
+        column.addView(
+            segmented(
+                Prefs.LETTER_SIZE, "m",
+                listOf("s" to "Мелкие", "m" to "Средние", "l" to "Крупные")
+            )
+        )
         column.addView(body("Форма клавиш"))
         column.addView(
             segmented(
@@ -118,7 +125,7 @@ class SettingsActivity : Activity() {
                 listOf("theme" to "Как в теме", "round" to "Круглые", "square" to "Квадратные")
             )
         )
-        column.addView(switchRow("Ряд цифр сверху", Prefs.NUMBER_ROW, false))
+        column.addView(switchRow("Ряд цифр сверху", Prefs.NUMBER_ROW, true))
         column.addView(switchRow("Увеличенная буква при нажатии", Prefs.PREVIEW, true))
         column.addView(switchRow("Вибрация клавиш", Prefs.HAPTICS, true))
     }

@@ -56,7 +56,8 @@ class PhraseKeyboardService : InputMethodService() {
     private var categoryIndex = 0
     private var lastCorrection: Correction? = null
     private var builtVersion = -1
-    private var toolbarOpen = false
+    private var menuOpen = false
+    private var symbolPage = 0
 
     // снимок настроек
     private var theme: KeyboardTheme = Themes.all[0]
@@ -67,8 +68,9 @@ class PhraseKeyboardService : InputMethodService() {
     private var autocapOn = true
     private var hapticsOn = true
     private var previewOn = true
-    private var numberRow = false
+    private var numberRow = true
     private var heightMode = "mid"
+    private var letterSize = "m"
     private var shape = "theme"
 
     // свойства текущего поля ввода
@@ -81,7 +83,8 @@ class PhraseKeyboardService : InputMethodService() {
     private lateinit var tabsRow: LinearLayout
     private lateinit var chipsFlow: FlowLayout
     private lateinit var arrow: TextView
-    private lateinit var toolbar: LinearLayout
+    private lateinit var stripView: LinearLayout
+    private lateinit var menuView: LinearLayout
     private lateinit var suggestRow: LinearLayout
     private lateinit var preview: TextView
 
@@ -127,8 +130,9 @@ class PhraseKeyboardService : InputMethodService() {
         autocapOn = Prefs.bool(this, Prefs.AUTOCAP, true)
         hapticsOn = Prefs.bool(this, Prefs.HAPTICS, true)
         previewOn = Prefs.bool(this, Prefs.PREVIEW, true)
-        numberRow = Prefs.bool(this, Prefs.NUMBER_ROW, false)
+        numberRow = Prefs.bool(this, Prefs.NUMBER_ROW, true)
         heightMode = Prefs.str(this, Prefs.HEIGHT, "mid")
+        letterSize = Prefs.str(this, Prefs.LETTER_SIZE, "m")
         shape = Prefs.str(this, Prefs.SHAPE, "theme")
     }
 
@@ -138,6 +142,7 @@ class PhraseKeyboardService : InputMethodService() {
         letterKeys.clear()
         suggestViews.clear()
         shiftKey = null
+        menuOpen = false
 
         val frame = FrameLayout(this)
         root = frame
@@ -146,30 +151,34 @@ class PhraseKeyboardService : InputMethodService() {
 
         val content = LinearLayout(this)
         content.orientation = LinearLayout.VERTICAL
-        content.setPadding(dp(3), dp(2), dp(3), dp(6))
+        content.setPadding(dp(3), 0, dp(3), dp(6))
 
-        content.addView(buildStrip(), LinearLayout.LayoutParams(MATCH, dp(STRIP_DP)))
+        stripView = buildStrip()
+        content.addView(stripView, LinearLayout.LayoutParams(MATCH, dp(STRIP_IDLE_DP)))
 
         keysView = LinearLayout(this)
         keysView.orientation = LinearLayout.VERTICAL
         phrasesView = buildPhrasesView()
         phrasesView.visibility = View.GONE
+        menuView = buildMenuView()
+        menuView.visibility = View.GONE
 
         val body = FrameLayout(this)
         body.addView(keysView, FrameLayout.LayoutParams(MATCH, MATCH))
         body.addView(phrasesView, FrameLayout.LayoutParams(MATCH, MATCH))
+        body.addView(menuView, FrameLayout.LayoutParams(MATCH, MATCH))
         content.addView(body, LinearLayout.LayoutParams(MATCH, dp(bodyHeightDp())))
 
         frame.addView(content, FrameLayout.LayoutParams(MATCH, WRAP))
 
         preview = TextView(this)
         preview.gravity = Gravity.CENTER
-        preview.setTextSize(TypedValue.COMPLEX_UNIT_SP, 30f)
+        preview.setTextSize(TypedValue.COMPLEX_UNIT_SP, 28f)
         preview.setTextColor(theme.text)
         preview.background = roundRect(withAlpha(theme.key, 255), 10)
         preview.elevation = dp(6).toFloat()
         preview.visibility = View.GONE
-        frame.addView(preview, FrameLayout.LayoutParams(dp(60), dp(56)))
+        frame.addView(preview, FrameLayout.LayoutParams(dp(60), dp(48)))
 
         renderKeys()
         refreshSuggestions()
@@ -199,7 +208,10 @@ class PhraseKeyboardService : InputMethodService() {
         lastCorrection = null
         shift = Shift.OFF
         updateAutoShift()
-        if (!restarting) showKeys()
+        if (!restarting) {
+            closeMenu(false)
+            showKeys()
+        }
         renderKeys()
         refreshSuggestions()
     }
@@ -256,47 +268,56 @@ class PhraseKeyboardService : InputMethodService() {
     }
 
     private fun bodyHeightDp(): Int {
-        val landscape =
-            resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
         var rowDp = when (heightMode) {
-            "low" -> 44f
-            "high" -> 56f
-            else -> 50f
+            "low" -> 40f
+            "high" -> 50f
+            else -> 44f
         }
-        if (landscape) rowDp *= 0.78f
+        if (isLandscape()) rowDp *= 0.78f
         val rows = if (numberRow) 5 else 4
         return (rowDp * rows).toInt()
     }
 
+    private fun isLandscape(): Boolean =
+        resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
+
+    private fun letterSp(): Float {
+        val base = when (letterSize) {
+            "s" -> 15f
+            "l" -> 20f
+            else -> 17f
+        }
+        return if (isLandscape()) base * 0.85f else base
+    }
+
     // ------------------------------------------------------------------ строка подсказок
 
+    /**
+     * Верхняя полоска: в покое — тонкая, только маленькая стрелка слева. Пока печатаешь —
+     * вырастает и показывает подсказки. Нажатие на стрелку (или на саму полоску) выдвигает меню.
+     */
     private fun buildStrip(): LinearLayout {
         val strip = LinearLayout(this)
         strip.orientation = LinearLayout.HORIZONTAL
         strip.gravity = Gravity.CENTER_VERTICAL
+        strip.isClickable = true
+        strip.setOnClickListener {
+            haptic(it)
+            toggleMenu()
+        }
 
-        // Маленькая стрелка слева: открывает/скрывает меню (Фразы, Тема, Настройки).
         arrow = TextView(this)
         arrow.gravity = Gravity.CENTER
-        arrow.setTextSize(TypedValue.COMPLEX_UNIT_SP, 26f)
+        arrow.setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
         arrow.setTextColor(theme.hint)
+        arrow.setPadding(0, 0, 0, 0)
+        arrow.includeFontPadding = false
         arrow.isClickable = true
         arrow.setOnClickListener {
             haptic(it)
-            toolbarOpen = !toolbarOpen
-            refreshSuggestions()
+            toggleMenu()
         }
-        strip.addView(arrow, LinearLayout.LayoutParams(dp(40), MATCH))
-
-        val content = FrameLayout(this)
-
-        toolbar = LinearLayout(this)
-        toolbar.orientation = LinearLayout.HORIZONTAL
-        toolbar.gravity = Gravity.CENTER_VERTICAL
-        toolbar.addView(chip("Фразы", accent = true) { closeToolbar(); togglePhrases() }, chipLp())
-        toolbar.addView(chip("Тема") { closeToolbar(); cycleTheme() }, chipLp())
-        toolbar.addView(chip("Настройки") { closeToolbar(); openSettings() }, chipLp())
-        content.addView(toolbar, FrameLayout.LayoutParams(MATCH, MATCH))
+        strip.addView(arrow, LinearLayout.LayoutParams(dp(48), MATCH))
 
         suggestRow = LinearLayout(this)
         suggestRow.orientation = LinearLayout.HORIZONTAL
@@ -307,7 +328,7 @@ class PhraseKeyboardService : InputMethodService() {
             tv.gravity = Gravity.CENTER
             tv.setSingleLine(true)
             tv.ellipsize = TextUtils.TruncateAt.END
-            tv.setTextSize(TypedValue.COMPLEX_UNIT_SP, 17f)
+            tv.setTextSize(TypedValue.COMPLEX_UNIT_SP, 16f)
             tv.setTextColor(theme.text)
             tv.setPadding(dp(6), 0, dp(6), 0)
             tv.isClickable = true
@@ -323,49 +344,166 @@ class PhraseKeyboardService : InputMethodService() {
             if (i < 2) {
                 val divider = View(this)
                 divider.setBackgroundColor(withAlpha(theme.hint, 110))
-                suggestRow.addView(divider, LinearLayout.LayoutParams(dp(1), dp(20)))
+                suggestRow.addView(divider, LinearLayout.LayoutParams(dp(1), dp(18)))
             }
         }
-        content.addView(suggestRow, FrameLayout.LayoutParams(MATCH, MATCH))
-
-        strip.addView(content, LinearLayout.LayoutParams(0, MATCH, 1f))
+        strip.addView(suggestRow, LinearLayout.LayoutParams(0, MATCH, 1f))
         return strip
     }
 
-    private fun closeToolbar() {
-        toolbarOpen = false
+    private fun setStripHeight(dpValue: Int) {
+        val lp = stripView.layoutParams ?: return
+        val px = dp(dpValue)
+        if (lp.height != px) {
+            lp.height = px
+            stripView.layoutParams = lp
+        }
+    }
+
+    private fun updateStrip(showSuggestions: Boolean) {
+        val show = !menuOpen && showSuggestions
+        arrow.text = if (menuOpen) "\u25BE" else "\u25B4"
+        suggestRow.visibility = if (show) View.VISIBLE else View.GONE
+        setStripHeight(if (show) STRIP_SUGGEST_DP else STRIP_IDLE_DP)
+    }
+
+    // ------------------------------------------------------------------ меню с пунктами
+
+    private class MenuItem(val icon: String, val label: String, val action: () -> Unit)
+
+    private fun buildMenuView(): LinearLayout {
+        val menu = LinearLayout(this)
+        menu.orientation = LinearLayout.VERTICAL
+        menu.background = backgroundDrawable()
+        menu.isClickable = true
+        menu.setPadding(dp(6), dp(4), dp(6), dp(4))
+
+        val items = listOf(
+            MenuItem("\uD83D\uDCAC", "Фразы") { showPhrases() },
+            MenuItem("\uD83D\uDE0A", "Смайлы") { showEmoji() },
+            MenuItem("\uD83C\uDFA8", "Тема") { cycleTheme() },
+            MenuItem("\u2699", "Настройки") { openSettings() },
+            MenuItem("\uD83D\uDD22", "Ряд цифр") { toggleNumberRow() },
+            MenuItem("\uD83D\uDD20", "Размер букв") { cycleLetterSize() },
+            MenuItem("\u2195", "Высота") { cycleHeight() },
+            MenuItem("\uD83C\uDF10", "Клавиатура") { showImePicker() }
+        )
+        for (r in 0 until 2) {
+            val row = LinearLayout(this)
+            row.orientation = LinearLayout.HORIZONTAL
+            row.gravity = Gravity.CENTER_VERTICAL
+            for (c in 0 until 4) {
+                val item = items[r * 4 + c]
+                row.addView(menuItemView(item), LinearLayout.LayoutParams(0, WRAP, 1f))
+            }
+            menu.addView(row, LinearLayout.LayoutParams(MATCH, 0, 1f))
+        }
+        return menu
+    }
+
+    private fun menuItemView(item: MenuItem): View {
+        val box = LinearLayout(this)
+        box.orientation = LinearLayout.VERTICAL
+        box.gravity = Gravity.CENTER_HORIZONTAL
+        box.isClickable = true
+
+        val circle = TextView(this)
+        circle.text = item.icon
+        circle.gravity = Gravity.CENTER
+        circle.setTextSize(TypedValue.COMPLEX_UNIT_SP, 20f)
+        circle.setTextColor(theme.text)
+        circle.includeFontPadding = false
+        circle.background = keyBackground(withAlpha(theme.keySpecial, 255), 22, false)
+        box.addView(circle, LinearLayout.LayoutParams(dp(44), dp(44)))
+
+        val label = TextView(this)
+        label.text = item.label
+        label.gravity = Gravity.CENTER
+        label.setSingleLine(true)
+        label.ellipsize = TextUtils.TruncateAt.END
+        label.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
+        label.setTextColor(theme.text)
+        label.setPadding(0, dp(2), 0, 0)
+        box.addView(label, LinearLayout.LayoutParams(MATCH, WRAP))
+
+        box.setOnClickListener {
+            haptic(it)
+            closeMenu(false)
+            item.action()
+        }
+        return box
+    }
+
+    private fun toggleMenu() {
+        if (menuOpen) closeMenu(true) else openMenu()
+    }
+
+    /** Меню выезжает снизу вверх поверх клавиш. */
+    private fun openMenu() {
+        if (!::menuView.isInitialized) return
+        menuOpen = true
+        menuView.animate().cancel()
+        menuView.visibility = View.VISIBLE
+        menuView.translationY = dp(bodyHeightDp()).toFloat()
+        menuView.animate().translationY(0f).setDuration(180).start()
         refreshSuggestions()
     }
 
-    /** Меню открыто — показываем его; иначе — подсказки (если есть). */
-    private fun updateStrip(showSuggestions: Boolean) {
-        arrow.text = if (toolbarOpen) "\u2039" else "\u203A"
-        toolbar.visibility = if (toolbarOpen) View.VISIBLE else View.GONE
-        suggestRow.visibility =
-            if (!toolbarOpen && showSuggestions) View.VISIBLE else View.GONE
-    }
-
-    private fun chip(label: String, accent: Boolean = false, onClick: () -> Unit): TextView {
-        val tv = TextView(this)
-        tv.text = label
-        tv.gravity = Gravity.CENTER
-        tv.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
-        tv.setPadding(dp(14), 0, dp(14), 0)
-        tv.setTextColor(if (accent) theme.accentText else theme.text)
-        val fill = if (accent) theme.accent else withAlpha(theme.keySpecial, theme.keyAlpha)
-        tv.background = keyBackground(fill, 16, false)
-        tv.isClickable = true
-        tv.setOnClickListener {
-            haptic(it)
-            onClick()
+    private fun closeMenu(animated: Boolean) {
+        if (!::menuView.isInitialized) return
+        val wasOpen = menuOpen
+        menuOpen = false
+        menuView.animate().cancel()
+        if (animated && wasOpen) {
+            menuView.animate()
+                .translationY(dp(bodyHeightDp()).toFloat())
+                .setDuration(150)
+                .withEndAction { if (!menuOpen) menuView.visibility = View.GONE }
+                .start()
+        } else {
+            menuView.visibility = View.GONE
+            menuView.translationY = 0f
         }
-        return tv
+        if (wasOpen) refreshSuggestions()
     }
 
-    private fun chipLp(): LinearLayout.LayoutParams {
-        val lp = LinearLayout.LayoutParams(WRAP, MATCH)
-        lp.setMargins(dp(3), dp(5), dp(3), dp(5))
-        return lp
+    private fun showEmoji() {
+        val index = PhraseLibrary.categories(this).indexOfFirst { it.emoji }
+        if (index >= 0) categoryIndex = index
+        showPhrases()
+    }
+
+    private fun toggleNumberRow() {
+        Prefs.putBool(this, Prefs.NUMBER_ROW, !numberRow)
+        rebuildView()
+    }
+
+    private fun cycleLetterSize() {
+        val next = when (letterSize) {
+            "s" -> "m"
+            "m" -> "l"
+            else -> "s"
+        }
+        Prefs.putStr(this, Prefs.LETTER_SIZE, next)
+        rebuildView()
+    }
+
+    private fun cycleHeight() {
+        val next = when (heightMode) {
+            "low" -> "mid"
+            "mid" -> "high"
+            else -> "low"
+        }
+        Prefs.putStr(this, Prefs.HEIGHT, next)
+        rebuildView()
+    }
+
+    private fun showImePicker() {
+        (getSystemService(INPUT_METHOD_SERVICE) as InputMethodManager).showInputMethodPicker()
+    }
+
+    private fun rebuildView() {
+        handler.post { setInputView(onCreateInputView()) }
     }
 
     private fun refreshSuggestions() {
@@ -420,7 +558,7 @@ class PhraseKeyboardService : InputMethodService() {
         val hasPhoto = File(filesDir, Prefs.PHOTO_FILE).exists()
         val next = Themes.next(theme.id, hasPhoto)
         Prefs.putStr(this, Prefs.THEME, next.id)
-        handler.post { setInputView(onCreateInputView()) }
+        rebuildView()
     }
 
     private fun openSettings() {
@@ -464,46 +602,60 @@ class PhraseKeyboardService : InputMethodService() {
         letterKeys.clear()
         shiftKey = null
 
-        val rows = when (layer) {
-            Layer.RU -> RU_ROWS
-            Layer.EN -> EN_ROWS
-            Layer.SYMBOLS -> SYM_ROWS
-        }
-
-        if (numberRow && layer != Layer.SYMBOLS) {
-            val numbers = newRow()
-            "1234567890".forEach { addCharKey(numbers, it) }
-            keysView.addView(numbers, rowLp())
-        }
-
-        val row0 = newRow()
-        rows[0].forEach { addCharKey(row0, it) }
-        keysView.addView(row0, rowLp())
-
-        val row1 = newRow()
-        val gap = (rows[0].length - rows[1].length) / 2f
-        if (gap > 0f) row1.addView(View(this), LinearLayout.LayoutParams(0, MATCH, gap))
-        rows[1].forEach { addCharKey(row1, it) }
-        if (gap > 0f) row1.addView(View(this), LinearLayout.LayoutParams(0, MATCH, gap))
-        keysView.addView(row1, rowLp())
-
-        val row2 = newRow()
-        if (layer == Layer.SYMBOLS) {
-            rows[2].forEach { addCharKey(row2, it) }
-            row2.addView(makeBackspace(), keyLp(2f))
-        } else {
-            row2.addView(makeShift(), keyLp(1.5f))
-            rows[2].forEach { addCharKey(row2, it) }
-            row2.addView(makeBackspace(), keyLp(1.5f))
-        }
-        keysView.addView(row2, rowLp())
+        if (layer == Layer.SYMBOLS) renderSymbols() else renderLetters()
 
         keysView.addView(makeBottomRow(), rowLp())
         refreshLetterCase()
     }
 
-    private fun addCharKey(row: LinearLayout, ch: Char) {
-        val key = makeKey(ch.toString())
+    private fun renderLetters() {
+        val rows = if (layer == Layer.RU) RU_ROWS else EN_ROWS
+
+        if (numberRow) keysView.addView(charRow("1234567890", letterSp() - 1f), rowLp())
+        keysView.addView(charRow(rows[0]), rowLp())
+
+        val row1 = newRow()
+        val gap = (rows[0].length - rows[1].length) / 2f
+        if (gap > 0f) row1.addView(View(this), LinearLayout.LayoutParams(0, MATCH, gap))
+        rows[1].forEach { addCharKey(row1, it, letterSp()) }
+        if (gap > 0f) row1.addView(View(this), LinearLayout.LayoutParams(0, MATCH, gap))
+        keysView.addView(row1, rowLp())
+
+        val row2 = newRow()
+        row2.addView(makeShift(), keyLp(1.5f))
+        rows[2].forEach { addCharKey(row2, it, letterSp()) }
+        row2.addView(makeBackspace(), keyLp(1.5f))
+        keysView.addView(row2, rowLp())
+    }
+
+    /** Символы: цифры + три страницы знаков (как на Samsung, плюс типографика). */
+    private fun renderSymbols() {
+        val page = SYMBOL_PAGES[symbolPage]
+        keysView.addView(charRow("1234567890", letterSp() - 1f), rowLp())
+        keysView.addView(charRow(page[0]), rowLp())
+        keysView.addView(charRow(page[1]), rowLp())
+
+        val row = newRow()
+        val toggle = makeKey("${symbolPage + 1}/${SYMBOL_PAGES.size}", special = true, textSp = 13f)
+        toggle.setOnClickListener {
+            haptic(it)
+            symbolPage = (symbolPage + 1) % SYMBOL_PAGES.size
+            renderKeys()
+        }
+        row.addView(toggle, keyLp(1.5f))
+        page[2].forEach { addCharKey(row, it, letterSp()) }
+        row.addView(makeBackspace(), keyLp(1.5f))
+        keysView.addView(row, rowLp())
+    }
+
+    private fun charRow(chars: String, sp: Float = letterSp()): LinearLayout {
+        val row = newRow()
+        chars.forEach { addCharKey(row, it, sp) }
+        return row
+    }
+
+    private fun addCharKey(row: LinearLayout, ch: Char, sp: Float) {
+        val key = makeKey(ch.toString(), textSp = sp)
         key.tag = ch
         key.setOnClickListener {
             haptic(it)
@@ -539,7 +691,7 @@ class PhraseKeyboardService : InputMethodService() {
         key.getLocationInWindow(keyLoc)
         root.getLocationInWindow(rootLoc)
         val bw = (key.width * 1.5f).toInt()
-        val bh = dp(56)
+        val bh = dp(46)
         val left = (keyLoc[0] - rootLoc[0] + (key.width - bw) / 2)
             .coerceIn(0, maxOf(0, root.width - bw))
         val top = maxOf(0, keyLoc[1] - rootLoc[1] - bh + dp(10))
@@ -571,7 +723,6 @@ class PhraseKeyboardService : InputMethodService() {
     private fun typeLetter(ch: Char) {
         val ic = currentInputConnection ?: return
         lastCorrection = null
-        toolbarOpen = false
         var out = if (shift != Shift.OFF) ch.uppercaseChar() else ch
         if (smart) {
             // «привет,как» -> «привет, как»
@@ -713,7 +864,7 @@ class PhraseKeyboardService : InputMethodService() {
         val small = 14f
 
         val symbolsLabel = when {
-            layer != Layer.SYMBOLS -> "?123"
+            layer != Layer.SYMBOLS -> "!#1"
             lastLetterLayer == Layer.RU -> "АБВ"
             else -> "ABC"
         }
@@ -721,11 +872,12 @@ class PhraseKeyboardService : InputMethodService() {
         symbols.setOnClickListener {
             haptic(it)
             layer = if (layer == Layer.SYMBOLS) lastLetterLayer else Layer.SYMBOLS
+            if (layer == Layer.SYMBOLS) symbolPage = 0
             renderKeys()
         }
 
         // Маленькая кнопка с мечетью открывает панель фраз и смайлов.
-        val mosque = makeKey("\uD83D\uDD4C", special = true, textSp = 18f)
+        val mosque = makeKey("\uD83D\uDD4C", special = true, textSp = 17f)
         mosque.setOnClickListener {
             haptic(it)
             togglePhrases()
@@ -742,7 +894,7 @@ class PhraseKeyboardService : InputMethodService() {
             enterText,
             special = !enterAccent,
             accent = enterAccent,
-            textSp = if (enterText.length > 2) small else 20f
+            textSp = if (enterText.length > 2) 13f else 18f
         )
         enter.setOnClickListener {
             haptic(it)
@@ -1033,7 +1185,7 @@ class PhraseKeyboardService : InputMethodService() {
         label: String,
         special: Boolean = false,
         accent: Boolean = false,
-        textSp: Float = if (iosLayout) 22f else 20f
+        textSp: Float = letterSp()
     ): TextView {
         val key = TextView(this)
         key.text = label
@@ -1111,13 +1263,19 @@ class PhraseKeyboardService : InputMethodService() {
     companion object {
         private const val MATCH = ViewGroup.LayoutParams.MATCH_PARENT
         private const val WRAP = ViewGroup.LayoutParams.WRAP_CONTENT
-        private const val STRIP_DP = 44
+        private const val STRIP_IDLE_DP = 26
+        private const val STRIP_SUGGEST_DP = 42
 
         private const val DELIMITERS = ",.!?:;"
 
         private val RU_ROWS = listOf("йцукенгшщзхъ", "фывапролджэ", "ячсмитьбю")
         private val EN_ROWS = listOf("qwertyuiop", "asdfghjkl", "zxcvbnm")
-        private val SYM_ROWS = listOf("1234567890", "-/:;()₽&@\"", "#+=.,?!'")
+        /** Три страницы символов; в каждой: два ряда по 10 знаков и ряд из 7. */
+        private val SYMBOL_PAGES = listOf(
+            listOf("+\u00D7\u00F7=/_<>[]", "!@#\u20BD%^&*()", "-'\":;,?"),
+            listOf("`~\\|{}\u20AC\u00A3\u00A5\$", "\u00B0\u2022\u25CB\u25CF\u25A1\u25A0\u2664\u2661\u25C7\u2667", "\u2606\u25AA\u00A4\u00AB\u00BB\u00A1\u00BF"),
+            listOf("\u2116\u00A7\u00A9\u00AE\u2122\u00B1\u2248\u2260\u2264\u2265", "\u2026\u2014\u2013\u2190\u2192\u2191\u2193\u2713\u2665\u2605", "\u201C\u201D\u201E\u2030\u00B6\u221E\u221A")
+        )
 
         /** Долгое нажатие на букву вводит запасной символ. */
         private val ALT_CHARS = mapOf('е' to 'ё')

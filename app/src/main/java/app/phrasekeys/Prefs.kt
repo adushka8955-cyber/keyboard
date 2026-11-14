@@ -17,6 +17,7 @@ object Prefs {
     const val NUMBER_ROW = "number_row"
     const val HEIGHT = "height" // low | mid | high
     const val SHAPE = "shape" // theme | round | square
+    const val LETTER_SIZE = "letter_size" // s | m | l
 
     const val PHOTO_FILE = "keyboard_bg.jpg"
 
