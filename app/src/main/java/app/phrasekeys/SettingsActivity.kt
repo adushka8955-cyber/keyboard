@@ -132,12 +132,20 @@ class SettingsActivity : Activity() {
         )
         column.addView(switchRow("Ряд цифр сверху", Prefs.NUMBER_ROW, true))
         column.addView(switchRow("Увеличенная буква при нажатии", Prefs.PREVIEW, true))
+        column.addView(switchRow("Стеклянные объёмные клавиши", Prefs.GLASS, true))
         column.addView(switchRow("Вибрация клавиш", Prefs.HAPTICS, true))
     }
 
     private fun buildSmartSection() {
         column.addView(heading("Умный ввод"))
         column.addView(switchRow("Подсказки слов (как T9)", Prefs.SUGGESTIONS, true))
+        column.addView(switchRow("Подсказки и там, где приложение их запрещает", Prefs.FORCE_SUGGEST, true))
+        column.addView(
+            hint(
+                "Некоторые приложения (например, Instagram) просят клавиатуру не показывать подсказки. " +
+                    "С этим переключателем подсказки и автоисправление работают везде, кроме паролей."
+            )
+        )
         column.addView(switchRow("Автоисправление опечаток", Prefs.AUTOCORRECT, true))
         column.addView(switchRow("Умная пунктуация", Prefs.SMART_PUNCT, true))
         column.addView(

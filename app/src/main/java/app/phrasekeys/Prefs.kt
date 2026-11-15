@@ -19,6 +19,8 @@ object Prefs {
     const val SHAPE = "shape" // theme | round | square
     const val LETTER_SIZE = "letter_size" // s | m | l
     const val LEARN = "learn_frequent"
+    const val GLASS = "glass_keys"
+    const val FORCE_SUGGEST = "force_suggest"
 
     const val PHOTO_FILE = "keyboard_bg.jpg"
 

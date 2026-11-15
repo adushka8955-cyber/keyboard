@@ -45,6 +45,14 @@ object Themes {
     )
 
     val all: List<KeyboardTheme> = listOf(
+        gradient(
+            "glass_dark", "Стекло тёмное", "#2B3F6B", "#0A1220", "#FFFFFF", "#8FA6D6",
+            "#FFFFFF", "#C9D5EE", "#0A84FF", "#FFFFFF", 10, 62
+        ),
+        gradient(
+            "glass_light", "Стекло светлое", "#E3EEFF", "#B4C8EE", "#FFFFFF", "#BFD0EE",
+            "#10223F", "#4B5D7C", "#007AFF", "#FFFFFF", 10, 200
+        ),
         solid(
             "ios_light", "iPhone светлая", "#D1D3D9", "#FFFFFF", "#ABB0BA",
             "#000000", "#6E727B", "#007AFF", "#FFFFFF", 6, true

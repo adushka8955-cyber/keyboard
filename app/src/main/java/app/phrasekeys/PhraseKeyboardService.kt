@@ -76,6 +76,10 @@ class PhraseKeyboardService : InputMethodService() {
     // свойства текущего поля ввода
     private var plainField = false
     private var noSuggestFlag = false
+    private var forceSuggest = true
+
+    /** Приложение запретило подсказки (флаг NO_SUGGESTIONS), и мы это уважаем. */
+    private val blockedByApp: Boolean get() = noSuggestFlag && !forceSuggest
     private var secretField = false
     private var emailField = false
     private var phoneField = false
@@ -87,7 +91,7 @@ class PhraseKeyboardService : InputMethodService() {
     private lateinit var phrasesView: LinearLayout
     private lateinit var tabsRow: LinearLayout
     private lateinit var chipsFlow: FlowLayout
-    private lateinit var arrow: TextView
+    private lateinit var arrow: ImageView
     private lateinit var stripView: LinearLayout
     private lateinit var menuView: LinearLayout
     private lateinit var suggestRow: LinearLayout
@@ -96,9 +100,17 @@ class PhraseKeyboardService : InputMethodService() {
     private val suggestViews = ArrayList<TextView>()
     private var currentSuggestions: List<Suggestion> = emptyList()
     private val letterKeys = ArrayList<TextView>()
-    private var shiftKey: TextView? = null
+    private var shiftKey: GlyphKey? = null
+    private var glassOn = true
 
     private val handler = Handler(Looper.getMainLooper())
+    private val refreshRunnable = Runnable { refreshSuggestions() }
+
+    /** Подсказки обновляются и сами по себе — на случай, если приложение не сообщает о движении курсора. */
+    private fun scheduleRefresh() {
+        handler.removeCallbacks(refreshRunnable)
+        handler.postDelayed(refreshRunnable, 40)
+    }
     private val deleteRunnable = object : Runnable {
         override fun run() {
             deleteOne()
@@ -115,7 +127,7 @@ class PhraseKeyboardService : InputMethodService() {
 
     private val smart: Boolean get() = punctOn && !plainField
     private val auto: Boolean
-        get() = autocorrectOn && !plainField && !noSuggestFlag && SpellEngine.isReady()
+        get() = autocorrectOn && !plainField && !blockedByApp && SpellEngine.isReady()
 
     // ------------------------------------------------------------------ жизненный цикл
 
@@ -136,6 +148,8 @@ class PhraseKeyboardService : InputMethodService() {
         hapticsOn = Prefs.bool(this, Prefs.HAPTICS, true)
         previewOn = Prefs.bool(this, Prefs.PREVIEW, true)
         memoryOn = Prefs.bool(this, Prefs.LEARN, true)
+        glassOn = Prefs.bool(this, Prefs.GLASS, true)
+        forceSuggest = Prefs.bool(this, Prefs.FORCE_SUGGEST, true)
         numberRow = Prefs.bool(this, Prefs.NUMBER_ROW, true)
         heightMode = Prefs.str(this, Prefs.HEIGHT, "mid")
         letterSize = Prefs.str(this, Prefs.LETTER_SIZE, "m")
@@ -260,7 +274,7 @@ class PhraseKeyboardService : InputMethodService() {
     }
 
     private val learnAllowed: Boolean
-        get() = memoryOn && !secretField && !noSuggestFlag &&
+        get() = memoryOn && !secretField && !blockedByApp &&
             (!plainField || emailField || phoneField)
 
     /**
@@ -352,12 +366,9 @@ class PhraseKeyboardService : InputMethodService() {
             toggleMenu()
         }
 
-        arrow = TextView(this)
-        arrow.gravity = Gravity.CENTER
-        arrow.setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
-        arrow.setTextColor(theme.hint)
-        arrow.setPadding(0, 0, 0, 0)
-        arrow.includeFontPadding = false
+        arrow = ImageView(this)
+        arrow.scaleType = ImageView.ScaleType.CENTER
+        arrow.setImageDrawable(VectorGlyph(Icons.CHEV_UP, theme.hint))
         arrow.isClickable = true
         arrow.setOnClickListener {
             haptic(it)
@@ -408,31 +419,31 @@ class PhraseKeyboardService : InputMethodService() {
 
     private fun updateStrip(showSuggestions: Boolean) {
         val show = !menuOpen && showSuggestions
-        arrow.text = if (menuOpen) "\u25BE" else "\u25B4"
+        arrow.animate().rotation(if (menuOpen) 180f else 0f).setDuration(160).start()
         suggestRow.visibility = if (show) View.VISIBLE else View.GONE
         setStripHeight(if (show) STRIP_SUGGEST_DP else STRIP_IDLE_DP)
     }
 
     // ------------------------------------------------------------------ меню с пунктами
 
-    private class MenuItem(val icon: String, val label: String, val action: () -> Unit)
+    private class MenuItem(val icon: Icon, val label: String, val action: () -> Unit)
 
     private fun buildMenuView(): LinearLayout {
         val menu = LinearLayout(this)
         menu.orientation = LinearLayout.VERTICAL
-        menu.background = backgroundDrawable()
         menu.isClickable = true
-        menu.setPadding(dp(6), dp(4), dp(6), dp(4))
+        menu.setPadding(dp(8), dp(6), dp(8), dp(6))
+        menu.background = glassPanel()
 
         val items = listOf(
-            MenuItem("\uD83D\uDCAC", "Фразы") { showPhrases() },
-            MenuItem("\uD83D\uDE0A", "Смайлы") { showEmoji() },
-            MenuItem("\uD83C\uDFA8", "Тема") { cycleTheme() },
-            MenuItem("\u2699", "Настройки") { openSettings() },
-            MenuItem("\uD83D\uDD22", "Ряд цифр") { toggleNumberRow() },
-            MenuItem("\uD83D\uDCC7", "Данные") { showCategoryKind(KIND_DATA) },
-            MenuItem("\u2B50", "Частые") { showCategoryKind(KIND_FREQUENT) },
-            MenuItem("\uD83C\uDF10", "Клавиатура") { showImePicker() }
+            MenuItem(Icons.PHRASES, "Фразы") { showPhrases() },
+            MenuItem(Icons.EMOJI, "Смайлы") { showEmoji() },
+            MenuItem(Icons.THEME, "Тема") { cycleTheme() },
+            MenuItem(Icons.SETTINGS, "Настройки") { openSettings() },
+            MenuItem(Icons.DIGITS, "Ряд цифр") { toggleNumberRow() },
+            MenuItem(Icons.DATA, "Данные") { showCategoryKind(KIND_DATA) },
+            MenuItem(Icons.FREQUENT, "Частые") { showCategoryKind(KIND_FREQUENT) },
+            MenuItem(Icons.GLOBE, "Клавиатура") { showImePicker() }
         )
         for (r in 0 until 2) {
             val row = LinearLayout(this)
@@ -440,27 +451,34 @@ class PhraseKeyboardService : InputMethodService() {
             row.gravity = Gravity.CENTER_VERTICAL
             for (c in 0 until 4) {
                 val item = items[r * 4 + c]
-                row.addView(menuItemView(item), LinearLayout.LayoutParams(0, WRAP, 1f))
+                row.addView(menuItemView(item), LinearLayout.LayoutParams(0, MATCH, 1f))
             }
             menu.addView(row, LinearLayout.LayoutParams(MATCH, 0, 1f))
         }
         return menu
     }
 
+    /** Мягкая стеклянная панель меню: полупрозрачная заливка и светлая кромка. */
+    private fun glassPanel(): Drawable {
+        val d = GradientDrawable(
+            GradientDrawable.Orientation.TOP_BOTTOM,
+            intArrayOf(Color.argb(46, 255, 255, 255), Color.argb(14, 255, 255, 255))
+        )
+        d.cornerRadius = dp(18).toFloat()
+        d.setStroke(dp(1), Color.argb(64, 255, 255, 255))
+        return d
+    }
+
     private fun menuItemView(item: MenuItem): View {
         val box = LinearLayout(this)
         box.orientation = LinearLayout.VERTICAL
-        box.gravity = Gravity.CENTER_HORIZONTAL
+        box.gravity = Gravity.CENTER
         box.isClickable = true
 
-        val circle = TextView(this)
-        circle.text = item.icon
-        circle.gravity = Gravity.CENTER
-        circle.setTextSize(TypedValue.COMPLEX_UNIT_SP, 20f)
-        circle.setTextColor(theme.text)
-        circle.includeFontPadding = false
-        circle.background = keyBackground(withAlpha(theme.keySpecial, 255), 22, false)
-        box.addView(circle, LinearLayout.LayoutParams(dp(44), dp(44)))
+        val icon = ImageView(this)
+        icon.scaleType = ImageView.ScaleType.FIT_CENTER
+        icon.setImageDrawable(VectorGlyph(item.icon))
+        box.addView(icon, LinearLayout.LayoutParams(dp(34), dp(34)))
 
         val label = TextView(this)
         label.text = item.label
@@ -469,9 +487,19 @@ class PhraseKeyboardService : InputMethodService() {
         label.ellipsize = TextUtils.TruncateAt.END
         label.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
         label.setTextColor(theme.text)
-        label.setPadding(0, dp(2), 0, 0)
+        label.setPadding(0, dp(4), 0, 0)
         box.addView(label, LinearLayout.LayoutParams(MATCH, WRAP))
 
+        // мягкое «нажатие» как на iPhone
+        box.setOnTouchListener { v, event ->
+            when (event.actionMasked) {
+                MotionEvent.ACTION_DOWN ->
+                    v.animate().scaleX(0.88f).scaleY(0.88f).setDuration(80).start()
+                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL ->
+                    v.animate().scaleX(1f).scaleY(1f).setDuration(120).start()
+            }
+            false
+        }
         box.setOnClickListener {
             haptic(it)
             closeMenu(false)
@@ -560,7 +588,7 @@ class PhraseKeyboardService : InputMethodService() {
 
     private fun refreshSuggestions() {
         if (!::suggestRow.isInitialized || !::phrasesView.isInitialized || !::arrow.isInitialized) return
-        if (!suggestionsOn || secretField || noSuggestFlag ||
+        if (!suggestionsOn || secretField || blockedByApp ||
             phrasesView.visibility == View.VISIBLE
         ) {
             updateStrip(false)
@@ -705,7 +733,7 @@ class PhraseKeyboardService : InputMethodService() {
     private fun renderLetters() {
         val rows = if (layer == Layer.RU) RU_ROWS else EN_ROWS
 
-        if (numberRow) keysView.addView(charRow("1234567890", letterSp() - 1f), rowLp())
+        if (numberRow) keysView.addView(charRow("1234567890", letterSp() - 1f, 1.2f), rowLp())
         keysView.addView(charRow(rows[0]), rowLp())
 
         val row1 = newRow()
@@ -725,9 +753,9 @@ class PhraseKeyboardService : InputMethodService() {
     /** Символы: цифры + три страницы знаков (как на Samsung, плюс типографика). */
     private fun renderSymbols() {
         val page = SYMBOL_PAGES[symbolPage]
-        keysView.addView(charRow("1234567890", letterSp() - 1f), rowLp())
-        keysView.addView(charRow(page[0]), rowLp())
-        keysView.addView(charRow(page[1]), rowLp())
+        keysView.addView(charRow("1234567890", letterSp() - 1f, 1.2f), rowLp())
+        keysView.addView(charRow(page[0], weight = 1.2f), rowLp())
+        keysView.addView(charRow(page[1], weight = 1.2f), rowLp())
 
         val row = newRow()
         val toggle = makeKey("${symbolPage + 1}/${SYMBOL_PAGES.size}", special = true, textSp = 13f)
@@ -736,19 +764,19 @@ class PhraseKeyboardService : InputMethodService() {
             symbolPage = (symbolPage + 1) % SYMBOL_PAGES.size
             renderKeys()
         }
-        row.addView(toggle, keyLp(1.5f))
-        page[2].forEach { addCharKey(row, it, letterSp()) }
-        row.addView(makeBackspace(), keyLp(1.5f))
+        row.addView(toggle, keyLp(1.8f))
+        page[2].forEach { addCharKey(row, it, letterSp(), 1.2f) }
+        row.addView(makeBackspace(), keyLp(1.8f))
         keysView.addView(row, rowLp())
     }
 
-    private fun charRow(chars: String, sp: Float = letterSp()): LinearLayout {
+    private fun charRow(chars: String, sp: Float = letterSp(), weight: Float = 1f): LinearLayout {
         val row = newRow()
-        chars.forEach { addCharKey(row, it, sp) }
+        chars.forEach { addCharKey(row, it, sp, weight) }
         return row
     }
 
-    private fun addCharKey(row: LinearLayout, ch: Char, sp: Float) {
+    private fun addCharKey(row: LinearLayout, ch: Char, sp: Float, weight: Float = 1f) {
         val key = makeKey(ch.toString(), textSp = sp)
         key.tag = ch
         key.setOnClickListener {
@@ -775,7 +803,7 @@ class PhraseKeyboardService : InputMethodService() {
             false
         }
         letterKeys.add(key)
-        row.addView(key, keyLp(1f))
+        row.addView(key, keyLp(weight))
     }
 
     private fun showPreview(key: TextView) {
@@ -905,7 +933,7 @@ class PhraseKeyboardService : InputMethodService() {
     }
 
     private fun makeShift(): TextView {
-        val key = makeKey("⇧", special = true)
+        val key = makeGlyphKey(Icons.SHIFT, theme.text, special = true)
         key.setOnClickListener {
             haptic(it)
             val now = SystemClock.uptimeMillis()
@@ -918,7 +946,7 @@ class PhraseKeyboardService : InputMethodService() {
             lastShiftTap = now
             refreshLetterCase()
         }
-        shiftKey = key
+        shiftKey = key as GlyphKey
         return key
     }
 
@@ -928,9 +956,14 @@ class PhraseKeyboardService : InputMethodService() {
             key.text = if (shift != Shift.OFF) ch.uppercaseChar().toString() else ch.toString()
         }
         shiftKey?.let { key ->
-            key.text = if (shift == Shift.CAPS) "⇪" else "⇧"
             val active = shift != Shift.OFF
-            key.setTextColor(if (active) theme.accentText else theme.text)
+            val icon = when (shift) {
+                Shift.CAPS -> Icons.SHIFT_CAPS
+                Shift.ONCE -> Icons.SHIFT_ON
+                else -> Icons.SHIFT
+            }
+            key.glyph = VectorGlyph(icon, if (active) theme.accentText else theme.text)
+            key.invalidate()
             val fill = if (active) theme.accent else withAlpha(theme.keySpecial, theme.keyAlpha)
             key.background = keyBackground(fill)
         }
@@ -970,35 +1003,50 @@ class PhraseKeyboardService : InputMethodService() {
             renderKeys()
         }
 
+        // Кнопка смайлов открывает вкладку со смайлами.
+        val emoji = makeGlyphKey(Icons.EMOJI, null, special = true, sizeDp = 26)
+        emoji.setOnClickListener {
+            haptic(it)
+            showEmoji()
+        }
+
         // Маленькая кнопка с мечетью открывает панель фраз и смайлов.
-        val mosque = makeKey("\uD83D\uDD4C", special = true, textSp = 17f)
+        val mosque = makeGlyphKey(Icons.MOSQUE, null, special = true, sizeDp = 30)
         mosque.setOnClickListener {
             haptic(it)
             togglePhrases()
         }
 
         val ru = lastLetterLayer == Layer.RU
-        val space = makeKey(if (ru) "\u2039   Русский   \u203A" else "\u2039   English   \u203A", textSp = 13f)
+        val space = SpaceKey(this)
+        makeKey(if (ru) "Русский" else "English", textSp = 14f, into = space)
+        space.tint = theme.hint
         space.setTextColor(theme.hint)
         attachSpaceGestures(space)
 
         val enterText = enterLabel()
         val enterAccent = enterIsAccent()
-        val enter = makeKey(
-            enterText,
-            special = !enterAccent,
-            accent = enterAccent,
-            textSp = if (enterText.length > 2) 13f else 18f
-        )
+        val plainEnter = enterText == "ввод" || enterText == "return" || enterText == "⏎"
+        val enter = if (plainEnter) {
+            makeGlyphKey(Icons.RETURN, theme.text, special = true, accent = false, sizeDp = 22)
+        } else {
+            makeKey(
+                enterText,
+                special = !enterAccent,
+                accent = enterAccent,
+                textSp = if (enterText.length > 2) 13f else 18f
+            )
+        }
         enter.setOnClickListener {
             haptic(it)
             pressEnter()
         }
 
         row.addView(symbols, keyLp(1.4f))
+        row.addView(emoji, keyLp(1f))
         row.addView(mosque, keyLp(1f))
         row.addView(simpleKey(','), keyLp(1f))
-        row.addView(space, keyLp(3.6f))
+        row.addView(space, keyLp(2.6f))
         row.addView(simpleKey('.'), keyLp(1f))
         row.addView(enter, keyLp(1.9f))
         return row
@@ -1092,7 +1140,7 @@ class PhraseKeyboardService : InputMethodService() {
     // ------------------------------------------------------------------ удаление
 
     private fun makeBackspace(): TextView {
-        val key = makeKey("⌫", special = true)
+        val key = makeGlyphKey(Icons.BACKSPACE, theme.text, special = true)
         key.setOnTouchListener { v, event ->
             when (event.actionMasked) {
                 MotionEvent.ACTION_DOWN -> {
@@ -1112,6 +1160,7 @@ class PhraseKeyboardService : InputMethodService() {
     }
 
     private fun deleteOne() {
+        scheduleRefresh()
         val correction = lastCorrection
         if (correction != null) {
             lastCorrection = null
@@ -1306,6 +1355,7 @@ class PhraseKeyboardService : InputMethodService() {
     // ------------------------------------------------------------------ вспомогательное
 
     private fun commit(text: String) {
+        scheduleRefresh()
         currentInputConnection?.commitText(text, 1)
     }
 
@@ -1317,9 +1367,10 @@ class PhraseKeyboardService : InputMethodService() {
         label: String,
         special: Boolean = false,
         accent: Boolean = false,
-        textSp: Float = letterSp()
+        textSp: Float = letterSp(),
+        into: TextView? = null
     ): TextView {
-        val key = TextView(this)
+        val key = into ?: TextView(this)
         key.text = label
         key.gravity = Gravity.CENTER
         key.includeFontPadding = false
@@ -1335,12 +1386,37 @@ class PhraseKeyboardService : InputMethodService() {
         return key
     }
 
+    /** Клавиша с нарисованным значком (стрелка, стереть, мечеть…). [tint] = null — цветной значок. */
+    private fun makeGlyphKey(
+        icon: Icon,
+        tint: Int?,
+        special: Boolean = false,
+        accent: Boolean = false,
+        sizeDp: Int = 24
+    ): TextView {
+        val key = GlyphKey(this)
+        makeKey("", special = special, accent = accent, into = key)
+        key.glyphPx = dp(sizeDp)
+        key.glyph = if (tint == null) VectorGlyph(icon) else VectorGlyph(icon, tint)
+        return key
+    }
+
     private fun keyBackground(
         fill: Int,
         radius: Int = keyRadiusDp,
         shadow: Boolean = theme.shadow
     ): Drawable {
         val states = StateListDrawable()
+        if (glassOn) {
+            val r = dp(maxOf(radius, 9)).toFloat()
+            val depth = dp(2).toFloat()
+            states.addState(
+                intArrayOf(android.R.attr.state_pressed),
+                GlassDrawable(shade(fill, 0.9f), r, depth, true)
+            )
+            states.addState(intArrayOf(), GlassDrawable(fill, r, depth, false))
+            return states
+        }
         states.addState(
             intArrayOf(android.R.attr.state_pressed),
             keyShape(shade(fill, 0.82f), radius, shadow)

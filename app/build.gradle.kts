@@ -11,8 +11,8 @@ android {
         applicationId = "app.phrasekeys"
         minSdk = 24
         targetSdk = 34
-        versionCode = 5
-        versionName = "2.3"
+        versionCode = 7
+        versionName = "2.5"
     }
 
     signingConfigs {
