@@ -1,5 +1,8 @@
 package app.phrasekeys
 
+import android.content.ClipDescription
+import android.content.ClipboardManager
+import android.content.Context
 import android.content.Intent
 import android.content.res.Configuration
 import android.graphics.BitmapFactory
@@ -11,6 +14,7 @@ import android.graphics.drawable.GradientDrawable
 import android.graphics.drawable.LayerDrawable
 import android.graphics.drawable.StateListDrawable
 import android.inputmethodservice.InputMethodService
+import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
@@ -104,12 +108,44 @@ class PhraseKeyboardService : InputMethodService() {
     private var glassOn = true
 
     private val handler = Handler(Looper.getMainLooper())
-    private val refreshRunnable = Runnable { refreshSuggestions() }
 
-    /** Подсказки обновляются и сами по себе — на случай, если приложение не сообщает о движении курсора. */
-    private fun scheduleRefresh() {
-        handler.removeCallbacks(refreshRunnable)
-        handler.postDelayed(refreshRunnable, 40)
+    // Одно общее обновление после набора: один запрос к приложению вместо пяти.
+    private val updateRunnable = Runnable { processUpdate() }
+    private var hasPending = false
+    private var pendingOldStart = 0
+    private var pendingNewStart = 0
+    private var pendingNewEnd = 0
+
+    private var appliedShift: Shift? = null
+    private var afterDelimiter: Char = NO_CHAR
+    private var shownSignature = ""
+    private var arrowOpen = false
+    private var predictOn = true
+    private var clipboardOn = true
+    private var clipIcon: VectorGlyph? = null
+    private var clipManager: ClipboardManager? = null
+    private val clipListener = ClipboardManager.OnPrimaryClipChangedListener { readClipboard(true) }
+
+    private fun requestUpdate(delayMs: Long) {
+        handler.removeCallbacks(updateRunnable)
+        handler.postDelayed(updateRunnable, delayMs)
+    }
+
+    private fun fetchBefore(n: Int = 200): String? =
+        currentInputConnection?.getTextBeforeCursor(n, 0)?.toString()
+
+    private fun processUpdate() {
+        if (!::keysView.isInitialized) return
+        val oldStart = pendingOldStart
+        val newStart = pendingNewStart
+        val newEnd = pendingNewEnd
+        hasPending = false
+        val before = fetchBefore() ?: ""
+        if (afterDelimiter != NO_CHAR && !before.endsWith(afterDelimiter)) afterDelimiter = NO_CHAR
+        trackMemory(oldStart, newStart, newEnd, before)
+        updateAutoShift(before)
+        refreshLetterCase()
+        refreshSuggestions(before)
     }
     private val deleteRunnable = object : Runnable {
         override fun run() {
@@ -134,6 +170,48 @@ class PhraseKeyboardService : InputMethodService() {
     override fun onCreate() {
         super.onCreate()
         SpellEngine.ensureLoaded(this)
+        Predictor.ensureLoaded(this)
+        clipManager = getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+        try {
+            clipManager?.addPrimaryClipChangedListener(clipListener)
+        } catch (e: Exception) {
+        }
+    }
+
+    override fun onDestroy() {
+        handler.removeCallbacksAndMessages(null)
+        try {
+            clipManager?.removePrimaryClipChangedListener(clipListener)
+        } catch (e: Exception) {
+        }
+        super.onDestroy()
+    }
+
+    /** Читает буфер обмена и запоминает новое. Секретное (пароли) пропускаем. */
+    private fun readClipboard(fromListener: Boolean = false) {
+        if (!clipboardOn) return
+        try {
+            val cm = clipManager ?: return
+            val clip = cm.primaryClip ?: return
+            if (clip.itemCount == 0) return
+            if (Build.VERSION.SDK_INT >= 33 &&
+                clip.description.extras?.getBoolean(ClipDescription.EXTRA_IS_SENSITIVE) == true
+            ) return
+            val text = clip.getItemAt(0).coerceToText(this)?.toString()?.trim() ?: return
+            if (text.isEmpty() || text.length > 2000) return
+            // возраст копии: старое содержимое буфера не выдаём за свежее
+            val stamp = clip.description.timestamp
+            val age = when {
+                stamp > 0 -> (System.currentTimeMillis() - stamp).coerceAtLeast(0)
+                fromListener -> 0L
+                else -> Long.MAX_VALUE / 4
+            }
+            if (ClipStore.onClip(text, SystemClock.uptimeMillis(), age) && ::keysView.isInitialized) {
+                requestUpdate(60)
+            }
+        } catch (e: Exception) {
+            // доступа к буферу нет — просто без плашки
+        }
     }
 
     override fun onEvaluateFullscreenMode(): Boolean = false
@@ -150,6 +228,8 @@ class PhraseKeyboardService : InputMethodService() {
         memoryOn = Prefs.bool(this, Prefs.LEARN, true)
         glassOn = Prefs.bool(this, Prefs.GLASS, true)
         forceSuggest = Prefs.bool(this, Prefs.FORCE_SUGGEST, true)
+        predictOn = Prefs.bool(this, Prefs.PREDICT, true)
+        clipboardOn = Prefs.bool(this, Prefs.CLIPBOARD, true)
         numberRow = Prefs.bool(this, Prefs.NUMBER_ROW, true)
         heightMode = Prefs.str(this, Prefs.HEIGHT, "mid")
         letterSize = Prefs.str(this, Prefs.LETTER_SIZE, "m")
@@ -174,7 +254,7 @@ class PhraseKeyboardService : InputMethodService() {
         content.setPadding(dp(3), 0, dp(3), dp(6))
 
         stripView = buildStrip()
-        content.addView(stripView, LinearLayout.LayoutParams(MATCH, dp(STRIP_IDLE_DP)))
+        content.addView(stripView, LinearLayout.LayoutParams(MATCH, dp(STRIP_DP)))
 
         keysView = LinearLayout(this)
         keysView.orientation = LinearLayout.VERTICAL
@@ -198,7 +278,7 @@ class PhraseKeyboardService : InputMethodService() {
         preview.background = roundRect(withAlpha(theme.key, 255), 10)
         preview.elevation = dp(6).toFloat()
         preview.visibility = View.GONE
-        frame.addView(preview, FrameLayout.LayoutParams(dp(60), dp(48)))
+        frame.addView(preview, FrameLayout.LayoutParams(dp(56), dp(52)))
 
         renderKeys()
         refreshSuggestions()
@@ -234,14 +314,17 @@ class PhraseKeyboardService : InputMethodService() {
             else -> if (layer == Layer.SYMBOLS) lastLetterLayer else layer
         }
         lastCorrection = null
+        afterDelimiter = NO_CHAR
         shift = Shift.OFF
-        updateAutoShift()
+        readClipboard()
+        val before = fetchBefore() ?: ""
+        updateAutoShift(before)
         if (!restarting) {
             closeMenu(false)
             showKeys()
         }
         renderKeys()
-        refreshSuggestions()
+        refreshSuggestions(before)
     }
 
     override fun onFinishInputView(finishingInput: Boolean) {
@@ -267,10 +350,13 @@ class PhraseKeyboardService : InputMethodService() {
             oldSelStart, oldSelEnd, newSelStart, newSelEnd, candidatesStart, candidatesEnd
         )
         if (!::keysView.isInitialized) return
-        trackMemory(oldSelStart, newSelStart, newSelEnd)
-        updateAutoShift()
-        refreshLetterCase()
-        refreshSuggestions()
+        if (!hasPending) {
+            pendingOldStart = oldSelStart
+            hasPending = true
+        }
+        pendingNewStart = newSelStart
+        pendingNewEnd = newSelEnd
+        requestUpdate(25)
     }
 
     private val learnAllowed: Boolean
@@ -281,22 +367,21 @@ class PhraseKeyboardService : InputMethodService() {
      * Следим за текстом поля. Когда поле разом опустело (сообщение отправили) —
      * запоминаем, что было набрано: фразу, почты, телефоны, даты.
      */
-    private fun trackMemory(oldStart: Int, newStart: Int, newEnd: Int) {
+    private fun trackMemory(oldStart: Int, newStart: Int, newEnd: Int, before: String) {
         if (!learnAllowed) {
             snapshot = null
             return
         }
-        val ic = currentInputConnection ?: return
         val prev = snapshot
-        if (newStart == 0 && newEnd == 0 && oldStart >= 4 && prev != null &&
-            ic.getTextAfterCursor(1, 0).isNullOrEmpty()
+        if (newStart == 0 && newEnd == 0 && oldStart >= 4 && prev != null && before.isEmpty() &&
+            currentInputConnection?.getTextAfterCursor(1, 0).isNullOrEmpty()
         ) {
             Memory.learnMessage(this, prev, true)
+            if (predictOn) Predictor.learn(this, prev)
             snapshot = null
             return
         }
-        val before = ic.getTextBeforeCursor(200, 0)?.toString()
-        snapshot = if (before != null && before.length < 200) before else null
+        snapshot = if (before.length < 200) before else null
     }
 
     // ------------------------------------------------------------------ фон и размеры
@@ -376,6 +461,7 @@ class PhraseKeyboardService : InputMethodService() {
         }
         strip.addView(arrow, LinearLayout.LayoutParams(dp(48), MATCH))
 
+        clipIcon = VectorGlyph(Icons.CLIP_TINT, theme.text).also { it.setBounds(0, 0, dp(16), dp(16)) }
         suggestRow = LinearLayout(this)
         suggestRow.orientation = LinearLayout.HORIZONTAL
         suggestRow.gravity = Gravity.CENTER_VERTICAL
@@ -408,20 +494,17 @@ class PhraseKeyboardService : InputMethodService() {
         return strip
     }
 
-    private fun setStripHeight(dpValue: Int) {
-        val lp = stripView.layoutParams ?: return
-        val px = dp(dpValue)
-        if (lp.height != px) {
-            lp.height = px
-            stripView.layoutParams = lp
-        }
-    }
+
 
     private fun updateStrip(showSuggestions: Boolean) {
         val show = !menuOpen && showSuggestions
-        arrow.animate().rotation(if (menuOpen) 180f else 0f).setDuration(160).start()
-        suggestRow.visibility = if (show) View.VISIBLE else View.GONE
-        setStripHeight(if (show) STRIP_SUGGEST_DP else STRIP_IDLE_DP)
+        if (arrowOpen != menuOpen) {
+            arrowOpen = menuOpen
+            arrow.animate().rotation(if (menuOpen) 180f else 0f).setDuration(160).start()
+        }
+        val vis = if (show) View.VISIBLE else View.GONE
+        if (suggestRow.visibility != vis) suggestRow.visibility = vis
+        if (!show) shownSignature = ""
     }
 
     // ------------------------------------------------------------------ меню с пунктами
@@ -440,7 +523,7 @@ class PhraseKeyboardService : InputMethodService() {
             MenuItem(Icons.EMOJI, "Смайлы") { showEmoji() },
             MenuItem(Icons.THEME, "Тема") { cycleTheme() },
             MenuItem(Icons.SETTINGS, "Настройки") { openSettings() },
-            MenuItem(Icons.DIGITS, "Ряд цифр") { toggleNumberRow() },
+            MenuItem(Icons.CLIP, "Буфер") { showCategoryKind(KIND_CLIPBOARD) },
             MenuItem(Icons.DATA, "Данные") { showCategoryKind(KIND_DATA) },
             MenuItem(Icons.FREQUENT, "Частые") { showCategoryKind(KIND_FREQUENT) },
             MenuItem(Icons.GLOBE, "Клавиатура") { showImePicker() }
@@ -586,51 +669,110 @@ class PhraseKeyboardService : InputMethodService() {
         handler.post { setInputView(onCreateInputView()) }
     }
 
-    private fun refreshSuggestions() {
+    /** Что стоит прямо перед курсором: начало слова и слово до него (для предсказания). */
+    private class Ctx(val prefix: String, val prev: String?, val valid: Boolean)
+
+    private fun contextWords(text: String): Ctx {
+        var i = text.length
+        while (i > 0 && isWordChar(text[i - 1])) i--
+        val prefix = text.substring(i)
+        // перед началом слова должен быть пробел, начало текста или новая строка
+        if (i > 0 && text[i - 1] != ' ' && text[i - 1] != '\n') return Ctx(prefix, null, false)
+        var j = i
+        while (j > 0 && text[j - 1] == ' ') j--
+        if (j == 0) return Ctx(prefix, null, true)
+        val c = text[j - 1]
+        if (c == '.' || c == '!' || c == '?' || c == '\n') return Ctx(prefix, null, true)
+        var k = j
+        while (k > 0 && text[k - 1] in ",;:") k--
+        var end = k
+        while (k > 0 && isWordChar(text[k - 1])) k--
+        if (k == end) return Ctx(prefix, null, false)
+        return Ctx(prefix, text.substring(k, end), true)
+    }
+
+    private fun refreshSuggestions(known: String? = null) {
         if (!::suggestRow.isInitialized || !::phrasesView.isInitialized || !::arrow.isInitialized) return
-        if (!suggestionsOn || secretField || blockedByApp ||
-            phrasesView.visibility == View.VISIBLE
-        ) {
+        if (secretField || blockedByApp || phrasesView.visibility == View.VISIBLE) {
             updateStrip(false)
             return
         }
-        var mem: List<Suggestion> = if (memoryOn) memorySuggestions() else emptyList()
+        val text = known ?: fetchBefore() ?: ""
+        val ctx = contextWords(text)
+        val tokenEmpty = ctx.prefix.isEmpty() &&
+            (text.isEmpty() || text.last() == ' ' || text.last() == '\n')
+
+        // плашка «вставить» из буфера обмена
+        val clipText = if (clipboardOn && tokenEmpty) ClipStore.fresh(SystemClock.uptimeMillis()) else null
+        val clip = if (clipText != null) Suggestion(clipText, false, 0, false, true) else null
+
+        var mem: List<Suggestion> = if (suggestionsOn && memoryOn) memorySuggestions(text) else emptyList()
         var spell: List<Suggestion> = emptyList()
         var target: String? = null
-        if (!plainField) {
-            val info = currentWordInfo()
+        var predicted: List<Suggestion> = emptyList()
+        if (suggestionsOn && !plainField) {
+            val info = wordInfoFrom(text)
             if (info != null && !info.skip) {
                 spell = SpellEngine.suggest(info.raw)
                 if (auto) target = SpellEngine.autoCorrection(info.raw, info.sentenceStart)
             }
+            if (predictOn && ctx.valid) {
+                val capital = ctx.prev == null && ctx.prefix.isEmpty() ||
+                    (ctx.prefix.isNotEmpty() && ctx.prefix[0].isUpperCase())
+                predicted = Predictor.predict(ctx.prev, ctx.prefix, 3).map {
+                    val w = if (capital) it.replaceFirstChar { c -> c.uppercaseChar() } else it
+                    Suggestion(w, false, ctx.prefix.length, true)
+                }
+            }
         }
-        mem = mem.take(if (spell.isEmpty()) 3 else 1)
-        val list = (mem + spell).distinctBy { it.text.lowercase() }.take(3)
-        if (list.isEmpty()) {
+
+        val list = ArrayList<Suggestion>()
+        if (clip != null) list.add(clip)
+        if (spell.isEmpty()) {
+            list.addAll(mem.take(3))
+            list.addAll(predicted)
+        } else {
+            list.addAll(mem.take(1))
+            list.add(spell[0])
+            list.addAll(predicted.take(2))
+            list.addAll(spell.drop(1))
+        }
+        val result = list.distinctBy { it.text.lowercase() }.take(3)
+        if (result.isEmpty()) {
             updateStrip(false)
             return
         }
-        currentSuggestions = list
-        for (i in 0 until suggestViews.size) {
-            val tv = suggestViews[i]
-            val s = list.getOrNull(i)
-            if (s == null) {
-                tv.text = ""
-                tv.isClickable = false
-            } else {
-                tv.text = if (s.literal) "“${s.text}”" else s.text
-                tv.isClickable = true
+
+        val signature = result.joinToString("|") { "${it.text}/${it.literal}/${it.clip}" } + "#" + target
+        currentSuggestions = result
+        if (signature != shownSignature || suggestRow.visibility != View.VISIBLE) {
+            shownSignature = signature
+            for (i in 0 until suggestViews.size) {
+                val tv = suggestViews[i]
+                val sug = result.getOrNull(i)
+                if (sug == null) {
+                    tv.text = ""
+                    tv.isClickable = false
+                    tv.setCompoundDrawables(null, null, null, null)
+                } else {
+                    tv.text = if (sug.clip) sug.text.replace('\n', ' ') else if (sug.literal) "“${sug.text}”" else sug.text
+                    tv.isClickable = true
+                    if (sug.clip) {
+                        tv.setCompoundDrawables(clipIcon, null, null, null)
+                        tv.compoundDrawablePadding = dp(6)
+                    } else {
+                        tv.setCompoundDrawables(null, null, null, null)
+                    }
+                }
+                val bold = sug != null && !sug.literal && !sug.clip && target != null && sug.text == target
+                tv.setTypeface(null, if (bold) Typeface.BOLD else Typeface.NORMAL)
             }
-            val bold = s != null && !s.literal && target != null && s.text == target
-            tv.setTypeface(null, if (bold) Typeface.BOLD else Typeface.NORMAL)
         }
         updateStrip(true)
     }
 
     /** Подсказки из памяти: данные пользователя, частые фразы, почты и числа. */
-    private fun memorySuggestions(): List<Suggestion> {
-        val ic = currentInputConnection ?: return emptyList()
-        val before = ic.getTextBeforeCursor(120, 0)?.toString() ?: return emptyList()
+    private fun memorySuggestions(before: String): List<Suggestion> {
         val line = before.substringAfterLast('\n')
         val token = line.substringAfterLast(' ')
         val out = ArrayList<Suggestion>()
@@ -643,7 +785,7 @@ class PhraseKeyboardService : InputMethodService() {
         }
         if (plainField) return out
 
-        val complete = before.length < 120 || before.contains('\n')
+        val complete = before.length < 200 || before.contains('\n')
         val head = line.trimStart()
         if (complete && head.length >= 3) {
             for (p in Memory.phraseMatches(this, head)) {
@@ -664,8 +806,9 @@ class PhraseKeyboardService : InputMethodService() {
             ic.deleteSurroundingText(s.replace, 0)
             ic.commitText(s.text + tail, 1)
             ic.endBatchEdit()
+            if (s.clip) ClipStore.markUsed()
         } else {
-            val info = currentWordInfo() ?: return
+            val info = wordInfoFrom(fetchBefore(40) ?: return) ?: return
             ic.beginBatchEdit()
             ic.deleteSurroundingText(info.raw.length, 0)
             ic.commitText(s.text + tail, 1)
@@ -674,6 +817,9 @@ class PhraseKeyboardService : InputMethodService() {
         }
         lastCorrection = null
         lastSpaceTime = 0L
+        afterDelimiter = NO_CHAR
+        shownSignature = ""
+        if (!hasPending) requestUpdate(250)
     }
 
     private fun cycleTheme() {
@@ -692,9 +838,8 @@ class PhraseKeyboardService : InputMethodService() {
 
     // ------------------------------------------------------------------ слово у курсора
 
-    private fun currentWordInfo(): WordInfo? {
-        val ic = currentInputConnection ?: return null
-        val before = ic.getTextBeforeCursor(40, 0)?.toString() ?: return null
+    private fun wordInfoFrom(text: String): WordInfo? {
+        val before = if (text.length > 40) text.substring(text.length - 40) else text
         var i = before.length
         while (i > 0 && isWordChar(before[i - 1])) i--
         var start = i
@@ -727,6 +872,7 @@ class PhraseKeyboardService : InputMethodService() {
         if (layer == Layer.SYMBOLS) renderSymbols() else renderLetters()
 
         keysView.addView(makeBottomRow(), rowLp())
+        appliedShift = null
         refreshLetterCase()
     }
 
@@ -779,16 +925,18 @@ class PhraseKeyboardService : InputMethodService() {
     private fun addCharKey(row: LinearLayout, ch: Char, sp: Float, weight: Float = 1f) {
         val key = makeKey(ch.toString(), textSp = sp)
         key.tag = ch
-        key.setOnClickListener {
-            haptic(it)
-            onCharKey(ch)
-        }
         val alt = ALT_CHARS[ch]
         if (alt != null) {
+            // «е» с долгим нажатием «ё»: печатаем при отпускании
+            key.setOnClickListener {
+                haptic(it)
+                onCharKey(ch)
+            }
             key.setOnLongClickListener {
                 haptic(it)
                 val out = if (shift != Shift.OFF) alt.uppercaseChar() else alt
                 lastCorrection = null
+                afterDelimiter = NO_CHAR
                 commit(out.toString())
                 if (shift == Shift.ONCE) shift = Shift.OFF
                 refreshLetterCase()
@@ -797,7 +945,14 @@ class PhraseKeyboardService : InputMethodService() {
         }
         key.setOnTouchListener { v, event ->
             when (event.actionMasked) {
-                MotionEvent.ACTION_DOWN -> showPreview(v as TextView)
+                MotionEvent.ACTION_DOWN -> {
+                    showPreview(v as TextView)
+                    if (alt == null) {
+                        // обычные буквы печатаются сразу при касании, без ожидания отпускания
+                        haptic(v)
+                        onCharKey(ch)
+                    }
+                }
                 MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> hidePreview()
             }
             false
@@ -812,16 +967,14 @@ class PhraseKeyboardService : InputMethodService() {
         val rootLoc = IntArray(2)
         key.getLocationInWindow(keyLoc)
         root.getLocationInWindow(rootLoc)
-        val bw = (key.width * 1.5f).toInt()
-        val bh = dp(46)
+        val bw = preview.layoutParams.width
+        val bh = preview.layoutParams.height
         val left = (keyLoc[0] - rootLoc[0] + (key.width - bw) / 2)
             .coerceIn(0, maxOf(0, root.width - bw))
         val top = maxOf(0, keyLoc[1] - rootLoc[1] - bh + dp(10))
-        val lp = FrameLayout.LayoutParams(bw, bh)
-        lp.leftMargin = left
-        lp.topMargin = top
-        preview.layoutParams = lp
-        preview.text = key.text
+        preview.translationX = left.toFloat()
+        preview.translationY = top.toFloat()
+        if (preview.text != key.text) preview.text = key.text
         preview.visibility = View.VISIBLE
     }
 
@@ -835,6 +988,7 @@ class PhraseKeyboardService : InputMethodService() {
             ch.isLetter() -> typeLetter(ch)
             else -> {
                 lastCorrection = null
+                afterDelimiter = NO_CHAR
                 commit(ch.toString())
                 if (shift == Shift.ONCE) shift = Shift.OFF
                 refreshLetterCase()
@@ -843,19 +997,14 @@ class PhraseKeyboardService : InputMethodService() {
     }
 
     private fun typeLetter(ch: Char) {
-        val ic = currentInputConnection ?: return
         lastCorrection = null
         var out = if (shift != Shift.OFF) ch.uppercaseChar() else ch
-        if (smart) {
+        if (smart && afterDelimiter != NO_CHAR) {
             // «привет,как» -> «привет, как»
-            val before = ic.getTextBeforeCursor(2, 0)?.toString()
-            if (before != null && before.length == 2 &&
-                before[1] in ",;!?" && before[0].isLetter()
-            ) {
-                commit(" ")
-                if (before[1] == '!' || before[1] == '?') out = out.uppercaseChar()
-            }
+            commit(" ")
+            if (afterDelimiter == '!' || afterDelimiter == '?') out = out.uppercaseChar()
         }
+        afterDelimiter = NO_CHAR
         commit(out.toString())
         if (shift == Shift.ONCE) shift = Shift.OFF
         refreshLetterCase()
@@ -864,17 +1013,16 @@ class PhraseKeyboardService : InputMethodService() {
     private fun typeDelimiter(d: Char) {
         val ic = currentInputConnection ?: return
         lastCorrection = null
-        if (auto) tryAutocorrect(d.toString())
-        if (smart && d in ",.!?") {
-            // «слово .» -> «слово.»
-            val before = ic.getTextBeforeCursor(2, 0)?.toString()
-            if (before != null && before.length == 2 && before[1] == ' ' &&
-                before[0] != ' ' && before[0] != '\n'
-            ) {
-                ic.deleteSurroundingText(1, 0)
-            }
+        var text = if (auto || smart) fetchBefore(40) ?: "" else ""
+        if (auto) text = tryAutocorrect(d.toString(), text)
+        if (smart && d in ",.!?" && text.length >= 2 && text.last() == ' ' &&
+            text[text.length - 2] != ' ' && text[text.length - 2] != '\n'
+        ) {
+            ic.deleteSurroundingText(1, 0)
+            text = text.dropLast(1)
         }
         commit(d.toString())
+        afterDelimiter = if (smart && d in ",;!?" && text.isNotEmpty() && text.last().isLetter()) d else NO_CHAR
         if (shift == Shift.ONCE) shift = Shift.OFF
         refreshLetterCase()
     }
@@ -883,26 +1031,27 @@ class PhraseKeyboardService : InputMethodService() {
         val ic = currentInputConnection ?: return
         val now = SystemClock.uptimeMillis()
         lastCorrection = null
-        if (smart && now - lastSpaceTime < 700) {
+        afterDelimiter = NO_CHAR
+        val text = if (auto || smart) fetchBefore(40) ?: "" else ""
+        if (smart && now - lastSpaceTime < 700 && text.length >= 2 && text.last() == ' ') {
             // двойной пробел -> «. »
-            val before = ic.getTextBeforeCursor(2, 0)?.toString()
-            if (before != null && before.length == 2 && before[1] == ' ' &&
-                (before[0].isLetterOrDigit() || before[0] in ")\"»")
-            ) {
+            val c = text[text.length - 2]
+            if (c.isLetterOrDigit() || c in ")\"»") {
                 ic.deleteSurroundingText(1, 0)
                 commit(". ")
                 lastSpaceTime = 0L
                 return
             }
         }
-        if (auto) tryAutocorrect(" ")
+        if (auto) tryAutocorrect(" ", text)
         commit(" ")
         lastSpaceTime = now
     }
 
     private fun pressEnter() {
         lastCorrection = null
-        if (auto) tryAutocorrect("\n")
+        afterDelimiter = NO_CHAR
+        if (auto) tryAutocorrect("\n", fetchBefore(40) ?: "")
         lastCorrection = null
         val info = currentInputEditorInfo
         val options = info?.imeOptions ?: 0
@@ -919,17 +1068,18 @@ class PhraseKeyboardService : InputMethodService() {
     }
 
     /** Если набранное слово — опечатка, заменяет его; запоминает замену для отката. */
-    private fun tryAutocorrect(delimiter: String) {
-        val ic = currentInputConnection ?: return
-        val info = currentWordInfo() ?: return
-        if (info.skip) return
-        val fixed = SpellEngine.autoCorrection(info.raw, info.sentenceStart) ?: return
-        if (fixed == info.raw) return
+    private fun tryAutocorrect(delimiter: String, before: String): String {
+        val ic = currentInputConnection ?: return before
+        val info = wordInfoFrom(before) ?: return before
+        if (info.skip) return before
+        val fixed = SpellEngine.autoCorrection(info.raw, info.sentenceStart) ?: return before
+        if (fixed == info.raw) return before
         ic.beginBatchEdit()
         ic.deleteSurroundingText(info.raw.length, 0)
         ic.commitText(fixed, 1)
         ic.endBatchEdit()
         lastCorrection = Correction(info.raw, fixed, delimiter)
+        return before.dropLast(info.raw.length) + fixed
     }
 
     private fun makeShift(): TextView {
@@ -951,6 +1101,8 @@ class PhraseKeyboardService : InputMethodService() {
     }
 
     private fun refreshLetterCase() {
+        if (appliedShift == shift) return
+        appliedShift = shift
         for (key in letterKeys) {
             val ch = key.tag as Char
             key.text = if (shift != Shift.OFF) ch.uppercaseChar().toString() else ch.toString()
@@ -969,17 +1121,15 @@ class PhraseKeyboardService : InputMethodService() {
         }
     }
 
-    private fun updateAutoShift() {
+    private fun updateAutoShift(before: String) {
         if (layer == Layer.SYMBOLS || shift == Shift.CAPS || plainField || !autocapOn) return
-        val ic = currentInputConnection ?: return
-        val info = currentInputEditorInfo
-        var cap = false
-        if (info != null && info.inputType != 0) {
-            cap = ic.getCursorCapsMode(info.inputType) != 0
-        }
-        if (!cap) {
-            val before = ic.getTextBeforeCursor(12, 0)?.toString()
-            if (before != null) cap = isSentenceStart(before)
+        var cap = isSentenceStart(before.takeLast(12))
+        if (before.isEmpty()) {
+            val ic = currentInputConnection
+            val info = currentInputEditorInfo
+            if (ic != null && info != null && info.inputType != 0) {
+                cap = cap || ic.getCursorCapsMode(info.inputType) != 0
+            }
         }
         shift = if (cap) Shift.ONCE else Shift.OFF
     }
@@ -1104,9 +1254,12 @@ class PhraseKeyboardService : InputMethodService() {
 
     private fun simpleKey(ch: Char): TextView {
         val key = makeKey(ch.toString())
-        key.setOnClickListener {
-            haptic(it)
-            onCharKey(ch)
+        key.setOnTouchListener { v, event ->
+            if (event.actionMasked == MotionEvent.ACTION_DOWN) {
+                haptic(v)
+                onCharKey(ch)
+            }
+            false
         }
         return key
     }
@@ -1160,7 +1313,8 @@ class PhraseKeyboardService : InputMethodService() {
     }
 
     private fun deleteOne() {
-        scheduleRefresh()
+        afterDelimiter = NO_CHAR
+        if (!hasPending) requestUpdate(250)
         val correction = lastCorrection
         if (correction != null) {
             lastCorrection = null
@@ -1301,16 +1455,16 @@ class PhraseKeyboardService : InputMethodService() {
                     lastCorrection = null
                     lastSpaceTime = 0L
                     val tail = when {
-                        category.kind == KIND_DATA -> ""
+                        category.kind == KIND_DATA || category.kind == KIND_CLIPBOARD -> ""
                         Memory.isTokenLike(value) -> ""
                         else -> " "
                     }
                     commit(value + tail)
                 }
-                if (category.kind == KIND_FREQUENT) {
+                if (category.kind == KIND_FREQUENT || category.kind == KIND_CLIPBOARD) {
                     chip.setOnLongClickListener {
                         haptic(it)
-                        Memory.forget(this, value)
+                        if (category.kind == KIND_CLIPBOARD) ClipStore.remove(value) else Memory.forget(this, value)
                         renderPhrases()
                         true
                     }
@@ -1336,8 +1490,12 @@ class PhraseKeyboardService : InputMethodService() {
                 openSettings()
             }
         } else {
-            tv.text = "Здесь появятся фразы, почты и числа, которые вы часто отправляете. " +
-                "Нажмите и держите, чтобы убрать."
+            tv.text = if (category.kind == KIND_CLIPBOARD) {
+                "Здесь появится всё, что вы скопируете. Нажмите и держите, чтобы убрать."
+            } else {
+                "Здесь появятся фразы, почты и числа, которые вы часто отправляете. " +
+                    "Нажмите и держите, чтобы убрать."
+            }
         }
         chipsFlow.addView(tv)
     }
@@ -1355,7 +1513,7 @@ class PhraseKeyboardService : InputMethodService() {
     // ------------------------------------------------------------------ вспомогательное
 
     private fun commit(text: String) {
-        scheduleRefresh()
+        if (!hasPending) requestUpdate(250)
         currentInputConnection?.commitText(text, 1)
     }
 
@@ -1471,8 +1629,8 @@ class PhraseKeyboardService : InputMethodService() {
     companion object {
         private const val MATCH = ViewGroup.LayoutParams.MATCH_PARENT
         private const val WRAP = ViewGroup.LayoutParams.WRAP_CONTENT
-        private const val STRIP_IDLE_DP = 26
-        private const val STRIP_SUGGEST_DP = 42
+        private const val STRIP_DP = 36
+        private const val NO_CHAR = '\u0000'
 
         private const val DELIMITERS = ",.!?:;"
 

@@ -177,6 +177,7 @@ object Memory {
     }
 
     fun clearLearned(context: Context) {
+        Predictor.clear(context)
         learned = LinkedHashMap()
         sp(context).edit().remove(KEY_LEARNED).apply()
     }

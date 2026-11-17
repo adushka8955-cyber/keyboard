@@ -139,6 +139,8 @@ class SettingsActivity : Activity() {
     private fun buildSmartSection() {
         column.addView(heading("Умный ввод"))
         column.addView(switchRow("Подсказки слов (как T9)", Prefs.SUGGESTIONS, true))
+        column.addView(switchRow("Предлагать следующее слово по смыслу", Prefs.PREDICT, true))
+        column.addView(switchRow("Плашка «вставить» из буфера обмена", Prefs.CLIPBOARD, true))
         column.addView(switchRow("Подсказки и там, где приложение их запрещает", Prefs.FORCE_SUGGEST, true))
         column.addView(
             hint(

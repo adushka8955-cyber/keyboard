@@ -21,6 +21,8 @@ object Prefs {
     const val LEARN = "learn_frequent"
     const val GLASS = "glass_keys"
     const val FORCE_SUGGEST = "force_suggest"
+    const val PREDICT = "predict_words"
+    const val CLIPBOARD = "clipboard_chip"
 
     const val PHOTO_FILE = "keyboard_bg.jpg"
 

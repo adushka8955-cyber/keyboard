@@ -9,7 +9,9 @@ class Suggestion(
     val literal: Boolean,
     /** >= 0: сколько символов перед курсором заменить (для фраз и данных из памяти). */
     val replace: Int = -1,
-    val space: Boolean = true
+    val space: Boolean = true,
+    /** Плашка «вставить из буфера обмена». */
+    val clip: Boolean = false
 )
 
 /**

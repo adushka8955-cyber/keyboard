@@ -121,7 +121,8 @@ class SpaceKey(context: Context) : TextView(context) {
 
 /**
  * Выпуклая «стеклянная» клавиша в стиле iOS: мягкая тень снизу, лёгкий градиент,
- * блик на верхней половине и тонкая светлая кромка.
+ * блик на верхней половине и тонкая светлая кромка. Шейдеры и контуры создаются один раз
+ * при смене размера, а не при каждой отрисовке — клавиатура не тормозит.
  */
 class GlassDrawable(
     private val fill: Int,
@@ -132,7 +133,13 @@ class GlassDrawable(
     private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
     private val body = RectF()
     private val shadow = RectF()
+    private val rim = RectF()
     private val clip = Path()
+    private var bodyShader: Shader? = null
+    private var glossShader: Shader? = null
+    private var rimShader: Shader? = null
+    private var glossBottom = 0f
+    private val shadowColor = Color.argb(if (pressed) 40 else 90, 0, 0, 0)
 
     private fun tone(c: Int, f: Float): Int {
         fun ch(v: Int): Int =
@@ -141,56 +148,54 @@ class GlassDrawable(
         return Color.argb(Color.alpha(c), ch(Color.red(c)), ch(Color.green(c)), ch(Color.blue(c)))
     }
 
-    override fun draw(canvas: Canvas) {
-        val b = bounds
+    override fun onBoundsChange(b: android.graphics.Rect) {
         if (b.isEmpty) return
         val lift = if (pressed) depth * 0.35f else depth
-        body.set(
-            b.left + 0.5f, b.top + (depth - lift) + 0.5f,
-            b.right - 0.5f, b.bottom - lift - 0.5f
-        )
-        paint.style = Paint.Style.FILL
-
-        // тень
+        body.set(b.left + 0.5f, b.top + (depth - lift) + 0.5f, b.right - 0.5f, b.bottom - lift - 0.5f)
         shadow.set(body.left, body.top + lift, body.right, body.bottom + lift)
-        paint.shader = null
-        paint.color = Color.argb(if (pressed) 40 else 90, 0, 0, 0)
-        canvas.drawRoundRect(shadow, radius, radius, paint)
+        rim.set(body.left + 0.6f, body.top + 0.6f, body.right - 0.6f, body.bottom - 0.6f)
 
-        // тело с градиентом
         val top = if (pressed) 1.0f else 1.16f
         val bottom = if (pressed) 0.84f else 0.90f
-        paint.shader = LinearGradient(
+        bodyShader = LinearGradient(
             0f, body.top, 0f, body.bottom, tone(fill, top), tone(fill, bottom), Shader.TileMode.CLAMP
         )
-        canvas.drawRoundRect(body, radius, radius, paint)
-
-        // блик
-        clip.reset()
-        clip.addRoundRect(body, radius, radius, Path.Direction.CW)
-        canvas.save()
-        canvas.clipPath(clip)
-        val h = body.height() * 0.52f
-        paint.shader = LinearGradient(
-            0f, body.top, 0f, body.top + h,
+        glossBottom = body.top + body.height() * 0.52f
+        glossShader = LinearGradient(
+            0f, body.top, 0f, glossBottom,
             Color.argb(if (pressed) 18 else 84, 255, 255, 255), Color.argb(0, 255, 255, 255),
             Shader.TileMode.CLAMP
         )
-        canvas.drawRect(body.left, body.top, body.right, body.top + h, paint)
-        canvas.restore()
-
-        // кромка
-        paint.style = Paint.Style.STROKE
-        paint.strokeWidth = 1.2f
-        paint.shader = LinearGradient(
+        rimShader = LinearGradient(
             0f, body.top, 0f, body.bottom,
             Color.argb(if (pressed) 60 else 150, 255, 255, 255), Color.argb(16, 255, 255, 255),
             Shader.TileMode.CLAMP
         )
-        canvas.drawRoundRect(
-            RectF(body.left + 0.6f, body.top + 0.6f, body.right - 0.6f, body.bottom - 0.6f),
-            radius, radius, paint
-        )
+        clip.reset()
+        clip.addRoundRect(body, radius, radius, Path.Direction.CW)
+    }
+
+    override fun draw(canvas: Canvas) {
+        if (bodyShader == null) return
+        paint.style = Paint.Style.FILL
+
+        paint.shader = null
+        paint.color = shadowColor
+        canvas.drawRoundRect(shadow, radius, radius, paint)
+
+        paint.shader = bodyShader
+        canvas.drawRoundRect(body, radius, radius, paint)
+
+        canvas.save()
+        canvas.clipPath(clip)
+        paint.shader = glossShader
+        canvas.drawRect(body.left, body.top, body.right, glossBottom, paint)
+        canvas.restore()
+
+        paint.style = Paint.Style.STROKE
+        paint.strokeWidth = 1.2f
+        paint.shader = rimShader
+        canvas.drawRoundRect(rim, radius, radius, paint)
     }
 
     override fun setAlpha(alpha: Int) {}

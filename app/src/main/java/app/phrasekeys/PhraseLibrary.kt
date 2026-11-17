@@ -15,6 +15,7 @@ data class PhraseCategory(
 const val KIND_PHRASES = 0
 const val KIND_DATA = 1
 const val KIND_FREQUENT = 2
+const val KIND_CLIPBOARD = 3
 
 /**
  * Встроенные фразы + «Мои фразы» пользователя.
@@ -177,6 +178,13 @@ object PhraseLibrary {
         )
         val frequent = Memory.frequent(context)
         val freq = PhraseCategory("Частые", frequent, kind = KIND_FREQUENT, values = frequent)
-        return base + data + freq + emojiCategories
+        val clips = ClipStore.history()
+        val clipboard = PhraseCategory(
+            "Буфер",
+            clips.map { it.replace('\n', ' ').take(70) },
+            kind = KIND_CLIPBOARD,
+            values = clips
+        )
+        return base + clipboard + data + freq + emojiCategories
     }
 }
